@@ -2,31 +2,21 @@ defmodule Managoat.ACP.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/BinaryBourbon/fountain/tree/main/apps/managoat_acp"
+  @source_url "https://github.com/managoat/managoat_acp"
 
   def project do
     [
       app: :managoat_acp,
       version: @version,
-      # Umbrella-first (decisions/0037): this app builds into the umbrella's
-      # _build and deps and shares its lockfile while it lives here. The three
-      # path lines go when it graduates to a managoat/<name> repository.
-      #
-      # Deliberately no `config_path` pointing at the umbrella's config: that
-      # config is Fountain's (config/runtime.exs calls Fountain modules), and
-      # this library reads no configuration at all. Everything the peer and
-      # the policy need arrives as an argument: the writer, the policy map,
-      # the configured ask timeout. Run from this directory the app boots
-      # with no config, which is what a consumer of the hex package gets too.
-      build_path: "../../_build",
-      deps_path: "../../deps",
-      lockfile: "../../mix.lock",
       elixir: "~> 1.18",
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       description:
         "A client-side Agent Client Protocol session that outlives the turn, with a per-tool permission policy, block normalisation, usage accounting and a tracer, behind a writer callback.",
       package: package(),
+      source_url: @source_url,
+      docs: docs(),
+      dialyzer: dialyzer(),
       test_coverage: [
         # What this suite measures on its own, set from the first
         # `mix test --cover` run after extraction (#1339) rather than to
@@ -42,6 +32,16 @@ defmodule Managoat.ACP.MixProject do
 
   defp deps do
     [
+      # Tooling for the repository, not the package: docs for hexdocs.pm (built
+      # by `mix hex.publish`), credo and dialyzer for CI. dialyxir is pinned to
+      # the commit that added OTP 28 support; 1.4.7 crashes on OTP 28 warnings.
+      {:ex_doc, "~> 0.34", only: :dev, runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:dialyxir,
+       github: "jeremyjh/dialyxir",
+       ref: "3553678f4d69281ac6db61034bcf35bcb30cfd78",
+       only: [:dev, :test],
+       runtime: false},
       {:jason, "~> 1.2"},
       # The tracer opens and closes OTel spans through the API macros
       # (`OpenTelemetry.Tracer`). The API package is the portable half of
@@ -56,8 +56,25 @@ defmodule Managoat.ACP.MixProject do
   defp package do
     [
       licenses: ["Apache-2.0"],
-      links: %{"GitHub" => @source_url},
-      files: ~w(lib mix.exs README.md LICENSE)
+      links: %{"GitHub" => @source_url, "Changelog" => "#{@source_url}/blob/main/CHANGELOG.md"},
+      files: ~w(lib mix.exs README.md CHANGELOG.md LICENSE NOTICE)
+    ]
+  end
+
+  defp docs do
+    [
+      main: "readme",
+      extras: ["README.md", "CHANGELOG.md"],
+      source_ref: "v#{@version}",
+      source_url: @source_url
+    ]
+  end
+
+  defp dialyzer do
+    [
+      ignore_warnings: ".dialyzer_ignore.exs",
+      # A fixed path so CI can cache the PLT across runs.
+      plt_file: {:no_warn, "priv/plts/dialyzer.plt"}
     ]
   end
 end
