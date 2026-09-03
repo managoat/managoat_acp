@@ -1,7 +1,7 @@
 defmodule Managoat.ACP.MixProject do
   use Mix.Project
 
-  @version "0.1.1"
+  @version "0.1.2"
   @source_url "https://github.com/managoat/managoat_acp"
 
   def project do
@@ -21,7 +21,7 @@ defmodule Managoat.ACP.MixProject do
         # What this suite measures on its own, set from the first
         # `mix test --cover` run after extraction (#1339) rather than to
         # pass. Raise it as the library's own tests grow; never lower it.
-        summary: [threshold: 90]
+        summary: [threshold: 95]
       ]
     ]
   end

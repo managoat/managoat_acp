@@ -55,6 +55,20 @@ defmodule Managoat.ACP.BlocksTest do
                  "content" => %{"type" => "image", "data" => "..."}
                })
     end
+
+    test "the other protocol content forms remain useful to a text transcript" do
+      assert [%{body: "sound[audio][image]https://example.test/file"}] =
+               update(%{
+                 "sessionUpdate" => "agent_message_chunk",
+                 "content" => [
+                   "sound",
+                   %{"type" => "audio"},
+                   %{"type" => "image"},
+                   %{"type" => "resource_link", "uri" => "https://example.test/file"},
+                   %{"type" => "resource_link", "uri" => nil}
+                 ]
+               })
+    end
   end
 
   describe "tool calls" do
@@ -117,6 +131,42 @@ defmodule Managoat.ACP.BlocksTest do
                  "toolCallId" => "c",
                  "status" => "failed"
                })
+    end
+
+    test "tool results render diffs, direct content, and raw output" do
+      assert [%{body: "diff: lib/app.ex\ndone"}] =
+               update(%{
+                 "sessionUpdate" => "tool_call_update",
+                 "toolCallId" => "c",
+                 "status" => "completed",
+                 "content" => [
+                   %{"type" => "diff", "path" => "lib/app.ex"},
+                   %{"type" => "text", "text" => "done"}
+                 ]
+               })
+
+      assert [%{body: "plain output"}] =
+               update(%{
+                 "sessionUpdate" => "tool_call_update",
+                 "toolCallId" => "c",
+                 "status" => "completed",
+                 "rawOutput" => "plain output"
+               })
+    end
+
+    test "tool summaries make bounded previews from structured input" do
+      long = String.duplicate("x", 150)
+
+      assert [%{summary: summary}] =
+               update(%{
+                 "sessionUpdate" => "tool_call",
+                 "toolCallId" => "c",
+                 "rawInput" => %{"count" => 2, "query" => long}
+               })
+
+      assert summary =~ "count=2"
+      assert String.ends_with?(summary, "…")
+      assert byte_size(summary) <= 123
     end
 
     test "in-flight updates produce nothing" do
@@ -201,6 +251,43 @@ defmodule Managoat.ACP.BlocksTest do
                    "content" => %{"type" => "text", "text" => "flat"}
                  })
                )
+    end
+
+    test "a permission request renders exactly the choices the agent offered" do
+      request =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => 42,
+          "method" => "session/request_permission",
+          "params" => %{
+            "toolCall" => %{"kind" => "execute", "rawInput" => %{"command" => "mix test"}},
+            "options" => [%{"optionId" => "yes", "kind" => "allow_once"}, "invalid"]
+          }
+        })
+
+      assert [block] = Blocks.from_line(request)
+      assert block.kind == :permission_request
+      assert block.request_id == "42"
+      assert block.name == "execute"
+      assert block.options == [%{"optionId" => "yes", "kind" => "allow_once"}]
+      assert block.summary =~ "mix test"
+    end
+
+    test "a malformed permission request still produces an answerable block" do
+      request =
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => "req-1",
+          "method" => "session/request_permission"
+        })
+
+      assert [%{request_id: "req-1", name: "tool", summary: "", options: []}] =
+               Blocks.from_line(request)
+    end
+
+    test "non-map updates are ignored" do
+      assert [] = Blocks.from_update(nil)
+      assert [] = Blocks.from_update(%{"update" => "not an update"})
     end
   end
 end

@@ -117,6 +117,28 @@ defmodule Managoat.ACP.TracerTest do
     assert tracer.text_bytes == 0
   end
 
+  test "plain text chunks count bytes and a kind names title-less tools" do
+    tracer =
+      Tracer.new(:span)
+      |> Tracer.handle_line(
+        update_line(%{"sessionUpdate" => "agent_message_chunk", "content" => "hello"})
+      )
+      |> Tracer.handle_line(tool_call("t1", %{"kind" => "execute"}))
+
+    assert tracer.text_bytes == 5
+    assert tracer.tool_calls == 1
+    assert Map.has_key?(tracer.open_tool_spans, "t1")
+  end
+
+  test "unknown update variants leave the trace unchanged" do
+    tracer = Tracer.new(:span)
+
+    assert Tracer.handle_line(
+             tracer,
+             update_line(%{"sessionUpdate" => "future_update", "value" => 1})
+           ) == tracer
+  end
+
   test "responses, requests and junk lines trace nothing" do
     tracer = Tracer.new(:span)
 

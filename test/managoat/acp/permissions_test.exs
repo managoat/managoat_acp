@@ -70,6 +70,7 @@ defmodule Managoat.ACP.PermissionsTest do
     test "an unset default is auto_allow" do
       assert Permissions.verdict_for(%{}, "Bash") == "auto_allow"
       assert Permissions.verdict_for(%{"Read" => "auto_deny"}, "Bash") == "auto_allow"
+      assert Permissions.verdict_for(nil, "Bash") == "auto_allow"
     end
 
     test "a value that is not a verdict denies rather than allowing" do
@@ -258,5 +259,16 @@ defmodule Managoat.ACP.PermissionsTest do
       assert Permissions.stricter("auto_allow", "ask") == "ask"
       assert Permissions.stricter("ask", "auto_deny") == "auto_deny"
     end
+  end
+
+  test "the public policy vocabulary and enforcement predicate stay aligned" do
+    assert Permissions.tool_kinds() ==
+             ~w(read edit delete move search execute think fetch switch_mode other)
+
+    assert Permissions.default_verdict() == "auto_allow"
+    refute Permissions.needs_enforcement?(nil)
+    refute Permissions.needs_enforcement?(%{"default" => "auto_allow"})
+    assert Permissions.needs_enforcement?(%{"execute" => "ask"})
+    assert Permissions.needs_enforcement?(%{"default" => "auto_deny"})
   end
 end
