@@ -10,6 +10,19 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-03
+
+### Fixed
+
+- `Usage.from_prompt_result/1` now reads gemini-cli's tokens. gemini leaves
+  the protocol's `usage` field empty and reports the turn under a vendor
+  extension at `_meta.quota.token_count`, snake-cased
+  (google-gemini/gemini-cli#24280, closed with no plans to add the standard
+  fields), so every gemini turn returned `nil` — a host billing from this
+  figure billed nothing at all (BinaryBourbon/fountain#1459). The new
+  `Usage.from_meta_quota/1` reads that shape; the protocol's own `usage`
+  still wins where both are present.
+
 ## [0.1.0] - 2026-09-02
 
 ### Added
