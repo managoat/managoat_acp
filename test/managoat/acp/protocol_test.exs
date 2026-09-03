@@ -99,6 +99,10 @@ defmodule Managoat.ACP.ProtocolTest do
       assert {:notification, "session/update", %{}} =
                Protocol.classify(%{"method" => "session/update", "params" => nil})
     end
+
+    test "a decoded JSON value that is not an RPC object is invalid" do
+      assert {:invalid, "[1,2,3]"} = Protocol.classify([1, 2, 3])
+    end
   end
 
   defp update_line(update) do

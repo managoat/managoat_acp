@@ -10,6 +10,14 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-03
+
+### Changed
+
+- Expanded behavior-focused coverage for transcript blocks, policy helpers,
+  protocol classification, tracing, and the shipped scripted agent, and raised
+  the coverage gate from 90% to 95%.
+
 ## [0.1.1] - 2026-09-03
 
 ### Fixed

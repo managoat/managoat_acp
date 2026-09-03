@@ -210,4 +210,17 @@ defmodule Managoat.ACP.Testing.ScriptedAgentTest do
 
     assert_receive {:scripted_agent, :wrote, %{"id" => 77, "error" => %{"code" => -32_601}}}
   end
+
+  test "the scripted agent rejects peer methods it does not implement" do
+    {:ok, agent} = ScriptedAgent.start_link([])
+
+    :ok =
+      ScriptedAgent.writer(agent).(Managoat.ACP.Protocol.request(99, "session/unknown", %{}))
+
+    assert_receive {:scripted_agent, :wrote, %{"id" => 99, "method" => "session/unknown"}}
+    :ok = ScriptedAgent.connect(agent, self())
+
+    assert_receive {:"$gen_cast", {:stdout, response}}
+    assert %{"id" => 99, "error" => %{"code" => -32_601}} = Jason.decode!(response)
+  end
 end
