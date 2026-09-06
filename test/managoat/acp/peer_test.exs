@@ -1248,6 +1248,54 @@ defmodule Managoat.ACP.PeerTest do
       refute_receive {:wrote, _}, 50
     end
 
+    # Claude's adapter accepts the full id and confirms its own canonical
+    # designation. Strict equality read that as a substitution and failed the
+    # turn, which took down every claude agent on an instance; codex, which
+    # echoes the id verbatim, was unaffected and hid it.
+    for {requested, confirmed} <- [
+          {"claude-opus-5", "opus"},
+          {"claude-sonnet-5", "sonnet"},
+          {"claude-haiku-4-5", "haiku"},
+          {"gpt-6-astra", "gpt-6-astra"}
+        ] do
+      test "#{requested} confirmed as #{confirmed} is the same model", ctx do
+        pid = start_peer(ctx, model: unquote(requested))
+        %{"id" => init_id} = next_write()
+        send_response(pid, init_id, %{"agentCapabilities" => caps()})
+        %{"id" => new_id} = next_write()
+        send_response(pid, new_id, caps_with_model_option())
+        %{"id" => set_id} = next_write()
+
+        send_response(pid, set_id, %{
+          "configOptions" => [%{"id" => "model", "currentValue" => unquote(confirmed)}]
+        })
+
+        assert_receive {:acp, _,
+                        {:model_selected, unquote(requested), unquote(confirmed), "runtime"}}
+
+        assert %{"method" => "session/prompt"} = next_write()
+      end
+    end
+
+    # The case the comparison exists for: a different model, not a shorter
+    # name for the same one.
+    test "a different family is still a substitution and fails", ctx do
+      pid = start_peer(ctx, model: "claude-opus-5")
+      %{"id" => init_id} = next_write()
+      send_response(pid, init_id, %{"agentCapabilities" => caps()})
+      %{"id" => new_id} = next_write()
+      send_response(pid, new_id, caps_with_model_option())
+      %{"id" => set_id} = next_write()
+
+      send_response(pid, set_id, %{
+        "configOptions" => [%{"id" => "model", "currentValue" => "claude-haiku-4-5"}]
+      })
+
+      assert_receive {:acp, _, {:failed, {:model_selection_failed, "claude-opus-5", detail}}}
+      assert detail =~ "claude-haiku-4-5"
+      refute_receive {:wrote, _}, 50
+    end
+
     test "no configured model means no round trip at all", ctx do
       pid = start_peer(ctx, [])
       %{"id" => init_id} = next_write()
