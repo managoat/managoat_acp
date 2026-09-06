@@ -10,6 +10,14 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-06
+
+### Fixed
+
+- Drop updates naming another session before persistence and replay accounting.
+  Cancel foreign permission requests before consulting the peer's policy, so
+  another session cannot inherit its auto-allow grants (#5).
+
 ## [0.2.0]
 
 ### Changed

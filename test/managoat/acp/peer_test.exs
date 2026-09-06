@@ -74,11 +74,11 @@ defmodule Managoat.ACP.PeerTest do
     Peer.stdout(pid, Jason.encode!(%{"jsonrpc" => "2.0", "id" => id, "result" => result}) <> "\n")
   end
 
-  defp update_line(update) do
+  defp update_line(update, session_id \\ "sess_abc") do
     Jason.encode!(%{
       "jsonrpc" => "2.0",
       "method" => "session/update",
-      "params" => %{"sessionId" => "s1", "update" => update}
+      "params" => %{"sessionId" => session_id, "update" => update}
     }) <> "\n"
   end
 
@@ -584,7 +584,7 @@ defmodule Managoat.ACP.PeerTest do
 
     defp usage_update_line(meta) do
       update = Map.merge(%{"sessionUpdate" => "usage_update", "used" => 10}, meta)
-      update_line(update)
+      update_line(update, "s")
     end
 
     test "the peer stays up after the stop reason", ctx do
@@ -641,7 +641,7 @@ defmodule Managoat.ACP.PeerTest do
     test "an out-of-turn update is still reported", ctx do
       pid = answered_turn(ctx)
 
-      Peer.stdout(pid, update_line(%{"sessionUpdate" => "agent_message_chunk"}))
+      Peer.stdout(pid, update_line(%{"sessionUpdate" => "agent_message_chunk"}, "s"))
 
       assert_receive {:acp, _ref, {:lines, "acp", line}}
       assert line =~ "agent_message_chunk"
@@ -1419,7 +1419,7 @@ defmodule Managoat.ACP.PeerTest do
     # history ignored, live requests answered, the prompt's answer ends it.
 
     defp attached_peer(ctx, prompt_id \\ 4) do
-      start_peer(ctx, mode: :continue, session_id: "sess_live", attach: prompt_id)
+      start_peer(ctx, mode: :continue, session_id: "sess_abc", attach: prompt_id)
     end
 
     test "writes nothing on start — no initialize, no session call, no second prompt", ctx do
@@ -1494,7 +1494,7 @@ defmodule Managoat.ACP.PeerTest do
       pid = attached_peer(ctx)
       Peer.cancel(pid)
 
-      assert %{"method" => "session/cancel", "params" => %{"sessionId" => "sess_live"}} =
+      assert %{"method" => "session/cancel", "params" => %{"sessionId" => "sess_abc"}} =
                next_write()
     end
 

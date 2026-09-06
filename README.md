@@ -81,6 +81,16 @@ The `ref` passed at start is echoed in every report, so an owner that runs
 several peers (or restarts one) matches on it and ignores a stale peer's
 messages without a second registry.
 
+Each peer requires its own process stream, including on reattach. The host
+owns that routing: JSON-RPC responses carry request ids but no session id,
+so peers cannot demultiplex a shared stream. As a defensive check, once the
+peer knows its session id it drops `session/update` notifications naming
+another session and answers foreign `session/request_permission` requests
+with `cancelled`, without evaluating its policy or reporting them as its
+owner's activity. Missing or null session ids retain compatibility behavior,
+as do frames before `session/new` establishes the id. This check does not
+recover output delivered to the wrong transport; the host must fix routing.
+
 ## What the owner receives
 
 Every message is `{:acp, ref, payload}`. The peer persists nothing and writes
