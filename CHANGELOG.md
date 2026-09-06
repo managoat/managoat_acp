@@ -10,6 +10,22 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-09-06
+
+### Fixed
+
+- A runtime confirming a model in its own canonical designation is no longer
+  read as a substitution. Claude's adapter accepts `claude-opus-5` and confirms
+  `opus`, and `claude-sonnet-5` and confirms `sonnet`; the strict equality
+  introduced with explicit model selection (#4) failed those turns before any
+  prompt was written, which took every claude agent on an instance offline.
+  Codex echoes the requested id verbatim and was unaffected, which is why the
+  defect reached production looking like a model-catalog problem. Designations
+  are now compared with case and separators normalised, and one containing the
+  other counts as agreement. An outright refusal still fails the turn, and a
+  confirmation naming a different model (`claude-haiku-4-5` for a requested
+  `claude-opus-5`) still fails, which is the case the check exists for.
+
 ## [0.2.1] - 2026-09-06
 
 ### Fixed

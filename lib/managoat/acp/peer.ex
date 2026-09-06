@@ -825,7 +825,7 @@ defmodule Managoat.ACP.Peer do
   defp handle_response(:set_model, result, state) do
     effective = current_model(result)
 
-    if is_binary(effective) and effective != state.model do
+    if is_binary(effective) and not same_model?(effective, state.model) do
       fail(
         state,
         {:model_selection_failed, state.model,
@@ -1064,6 +1064,40 @@ defmodule Managoat.ACP.Peer do
       _ -> false
     end
   end
+
+  # Whether the model the runtime confirmed is the one that was asked for.
+  #
+  # It is not a string comparison, and the reason cost a production outage.
+  # A runtime is free to answer in its own canonical designation: claude's
+  # adapter accepts `claude-opus-5` and confirms `opus`, and `claude-sonnet-5`
+  # and confirms `sonnet`. That is the same model named less precisely, not a
+  # substitution, and failing the turn over it took down every claude agent on
+  # an instance the day strict equality shipped — while codex, which echoes the
+  # id verbatim, looked fine.
+  #
+  # So: normalise away case and separators, then treat one designation
+  # containing the other as agreement. `opus` against `claude-opus-5` agrees;
+  # `claude-haiku-4-5` against `claude-opus-5` does not, and that is the case
+  # worth failing — the runtime quietly answering as a different model.
+  #
+  # A runtime that confirms a family without a version (`sonnet`) leaves us
+  # unable to tell `claude-sonnet-5` from `claude-sonnet-4-6`. That ambiguity
+  # is the runtime's, not something a comparison here can resolve; the answer
+  # is recorded as `effective` so a reader sees exactly what was confirmed.
+  # An outright refusal is a separate signal and still fails the turn: it
+  # arrives as an error response, handled above.
+  defp same_model?(effective, requested) do
+    a = normalise_model(effective)
+    b = normalise_model(requested)
+
+    a != "" and b != "" and (String.contains?(a, b) or String.contains?(b, a))
+  end
+
+  defp normalise_model(model) when is_binary(model) do
+    model |> String.downcase() |> String.replace(~r/[^a-z0-9]/, "")
+  end
+
+  defp normalise_model(_), do: ""
 
   defp current_model(result) do
     options = Map.get(result, "configOptions", [])
