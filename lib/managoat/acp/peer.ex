@@ -497,6 +497,29 @@ defmodule Managoat.ACP.Peer do
 
   # ── message dispatch ──────────────────────────────────────────────────────
 
+  # The host must route one process stream to one peer. Check the identity
+  # before replay accounting, persistence, or autonomous-cycle handling too:
+  # a foreign frame is never this session's history (issue #5).
+  defp handle_message(
+         {:notification, "session/update", %{"sessionId" => incoming}},
+         %State{session_id: expected} = state
+       )
+       when not is_nil(incoming) and not is_nil(expected) and incoming != expected do
+    Logger.warning("acp peer: dropping update for a different session")
+    state
+  end
+
+  # Fail closed without consulting this peer's policy or holding a question
+  # for its owner. `cancelled` is valid even when no reject option is offered.
+  defp handle_message(
+         {:request, id, "session/request_permission", %{"sessionId" => incoming}},
+         %State{session_id: expected} = state
+       )
+       when not is_nil(incoming) and not is_nil(expected) and incoming != expected do
+    Logger.warning("acp peer: cancelling permission request for a different session")
+    write(state, Protocol.response(id, %{outcome: %{outcome: "cancelled"}}))
+  end
+
   defp handle_message({:notification, "session/update", params}, state) do
     if state.replay_discard? do
       # Replay of history we already hold. Dropped, not persisted — see the
