@@ -92,7 +92,8 @@ nothing but protocol; these are the whole contract.
 | `{:session, id}` | `session/new` answered | Persist as the durable session id; hand it back as `session_id:` with `mode: :continue` on the next connection. |
 | `{:prompt_sent, id}` | the moment `session/prompt` is on the wire, first turn and every `prompt/3` | Persist on the turn. After a restart, a peer started with `attach: id` joins the turn already in flight and closes it on the response to that id. |
 | `{:handshake_ms, ms, method}` | `initialize` answered | A metric, labelled with the session call about to be made (`"session/new"`, `"session/resume"`, `"session/load"`), because those pay different prices. |
-| `{:model_rejected, requested, detail}` | the agent refused the configured model | Tell the user; the turn goes on with the runtime's default. |
+| `{:model_selected, requested, effective, source}` | selection before each prompt | Persist separately from saved configuration. `runtime` means returned model metadata; `selection_ack` means a successful setter response without a model field. |
+| `{:failed, {:model_selection_failed, requested, detail}}` | selection refused, unsupported, or confirmed a different model | Fail the turn. No `session/prompt` was written. |
 | `{:permission_ask, request_id, tool, options}` | the policy said `ask` | Show `options` to a human, arm a timeout (`Permissions.ask_timeout_ms/1`), answer with `Peer.answer_permission/3` or `Peer.deny_permission/2`. Persist `%{"request_id" => …, "tool" => …, "options" => […]}` as `pending_permission:` for a reattached peer, so a request raised before a restart is still answerable after one. The same request also arrives as a `{:lines, "acp", …}` so it renders inline as a `:permission_request` block. |
 | `{:permission_denied, tool, verdict}` | the policy said `auto_deny` (or a value that is not a verdict) | Audit it. Allows are deliberately not reported. |
 | `{:cycle_end, kind}` | a `usage_update` whose origin is in the adapter's autonomous set (a background task's follow-up) | Close whatever turn the owner opened for the out-of-turn lines. |
@@ -243,3 +244,14 @@ Extracted from [Fountain](https://github.com/BinaryBourbon/fountain) under
 as gate 3. The issue numbers in the code are that repository's; each marks an
 agent behaviour that was measured live and that the code is shaped around.
 Apache-2.0.
+
+## Changing a model on an open connection
+
+Use `Peer.prompt(peer, prompt, images, model: "model-id")` to apply a saved
+change before the next prompt, on the same session. Explicit selections are
+reapplied each turn. Omitting `:model` keeps the previous request. Setting it
+to `nil` removes the explicit pin and keeps the runtime's current session
+model; it does not reset the session or discard its history. No catalog
+allowlist is imposed by this client: the runtime accepts or rejects the ID.
+A successful selection is ACP evidence, not proof of provider execution;
+verify provider/session metadata when testing an integration.

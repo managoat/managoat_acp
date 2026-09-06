@@ -431,10 +431,9 @@ defmodule Managoat.ACP.PeerTest do
       %{"id" => init_id} = next_write()
       send_response(pid, init_id, %{"agentCapabilities" => caps()})
       %{"id" => new_id} = next_write()
-      # No `models` and no `configOptions`, so the model is never pinned — which
-      # is the #970 shape at its worst: nothing refuses the id until the turn
-      # calls it.
-      send_response(pid, new_id, %{"sessionId" => "s"})
+      send_response(pid, new_id, %{"sessionId" => "s", "models" => %{}})
+      %{"id" => set_id} = next_write()
+      send_response(pid, set_id, %{})
       %{"id" => prompt_id} = next_write()
 
       Peer.stdout(
@@ -462,7 +461,9 @@ defmodule Managoat.ACP.PeerTest do
       %{"id" => init_id} = next_write()
       send_response(pid, init_id, %{"agentCapabilities" => caps()})
       %{"id" => new_id} = next_write()
-      send_response(pid, new_id, %{"sessionId" => "s"})
+      send_response(pid, new_id, %{"sessionId" => "s", "models" => %{}})
+      %{"id" => set_id} = next_write()
+      send_response(pid, set_id, %{})
       %{"id" => prompt_id} = next_write()
 
       Peer.stdout(
@@ -1122,7 +1123,7 @@ defmodule Managoat.ACP.PeerTest do
       assert %{"method" => "session/prompt"} = next_write()
     end
 
-    test "says so in the transcript when the runtime has no model option", ctx do
+    test "fails before inference when the runtime has no model option", ctx do
       # Silently running someone else's model is the failure mode this whole
       # campaign keeps turning up. Not fatal, but not invisible either.
       pid = start_peer(ctx, model: "gemini-3.1-pro-preview")
@@ -1131,14 +1132,14 @@ defmodule Managoat.ACP.PeerTest do
       %{"id" => new_id} = next_write()
       send_response(pid, new_id, %{"sessionId" => "s"})
 
-      assert_receive {:acp, _ref, {:lines, "stderr", msg}}
-      assert msg =~ "does not expose model selection"
-      assert msg =~ "gemini-3.1-pro-preview"
+      assert_receive {:acp, _ref,
+                      {:failed, {:model_selection_failed, "gemini-3.1-pro-preview", detail}}}
 
-      assert %{"method" => "session/prompt"} = next_write()
+      assert detail =~ "does not expose model selection"
+      refute_receive {:wrote, _}, 50
     end
 
-    test "a refused model is reported but does not fail the turn", ctx do
+    test "a refused model fails before inference", ctx do
       pid = start_peer(ctx, model: "not-a-real-model")
       %{"id" => init_id} = next_write()
       send_response(pid, init_id, %{"agentCapabilities" => caps()})
@@ -1158,12 +1159,93 @@ defmodule Managoat.ACP.PeerTest do
       # Reported as a structured event, not an stderr line: stderr is the one
       # stream `?streams=acp,stage` and `fountain acp` both drop, so the
       # warning was invisible to protocol clients (#724).
-      assert_receive {:acp, _ref, {:model_rejected, "not-a-real-model", detail}}
+      assert_receive {:acp, _ref,
+                      {:failed, {:model_selection_failed, "not-a-real-model", detail}}}
+
       assert detail =~ "Invalid value for config option model"
 
-      # The turn still runs.
-      assert %{"method" => "session/prompt"} = next_write()
-      refute_receive {:acp, _ref, {:failed, _}}, 100
+      refute_receive {:wrote, _}, 50
+    end
+
+    test "repins changed models on the same session and reports runtime metadata", ctx do
+      pid = start_peer(ctx, model: "old")
+      %{"id" => init_id} = next_write()
+      send_response(pid, init_id, %{"agentCapabilities" => caps()})
+      %{"id" => new_id} = next_write()
+      send_response(pid, new_id, caps_with_model_option())
+      %{"id" => set_id} = next_write()
+
+      send_response(pid, set_id, %{
+        "configOptions" => [%{"id" => "model", "currentValue" => "old"}]
+      })
+
+      assert_receive {:acp, _, {:model_selected, "old", "old", "runtime"}}
+      %{"id" => prompt_id} = next_write()
+      send_response(pid, prompt_id, %{"stopReason" => "end_turn"})
+      assert_receive {:acp, _, {:done, _, _}}
+
+      assert :ok = Peer.prompt(pid, "next", [], model: "new")
+
+      assert %{
+               "method" => "session/set_config_option",
+               "id" => set_id,
+               "params" => %{"sessionId" => "s", "value" => "new"}
+             } = next_write()
+
+      refute_receive {:wrote, _}, 50
+
+      send_response(pid, set_id, %{
+        "configOptions" => [%{"id" => "model", "currentValue" => "new"}]
+      })
+
+      assert_receive {:acp, _, {:model_selected, "new", "new", "runtime"}}
+      assert %{"method" => "session/prompt", "params" => %{"sessionId" => "s"}} = next_write()
+    end
+
+    test "rejecting a changed model on reuse leaves the next prompt unwritten", ctx do
+      pid = start_peer(ctx, model: "old")
+      %{"id" => init_id} = next_write()
+      send_response(pid, init_id, %{"agentCapabilities" => caps()})
+      %{"id" => new_id} = next_write()
+      send_response(pid, new_id, caps_with_model_option())
+      %{"id" => set_id} = next_write()
+      send_response(pid, set_id, %{})
+      assert_receive {:acp, _, {:model_selected, "old", "old", "selection_ack"}}
+      %{"id" => prompt_id} = next_write()
+      send_response(pid, prompt_id, %{"stopReason" => "end_turn"})
+      assert_receive {:acp, _, {:done, _, _}}
+      assert :ok = Peer.prompt(pid, "must not run", [], model: "unavailable")
+      %{"id" => set_id, "method" => "session/set_config_option"} = next_write()
+
+      Peer.stdout(
+        pid,
+        Jason.encode!(%{
+          "jsonrpc" => "2.0",
+          "id" => set_id,
+          "error" => %{"code" => -32_602, "message" => "Invalid params"}
+        }) <> "\n"
+      )
+
+      assert_receive {:acp, _,
+                      {:failed, {:model_selection_failed, "unavailable", "Invalid params"}}}
+
+      refute_receive {:wrote, _}, 50
+    end
+
+    test "a mismatched confirmation never sends the prompt", ctx do
+      pid = start_peer(ctx, model: "wanted")
+      %{"id" => init_id} = next_write()
+      send_response(pid, init_id, %{"agentCapabilities" => caps()})
+      %{"id" => new_id} = next_write()
+      send_response(pid, new_id, caps_with_model_option())
+      %{"id" => set_id} = next_write()
+
+      send_response(pid, set_id, %{
+        "configOptions" => [%{"id" => "model", "currentValue" => "other"}]
+      })
+
+      assert_receive {:acp, _, {:failed, {:model_selection_failed, "wanted", _}}}
+      refute_receive {:wrote, _}, 50
     end
 
     test "no configured model means no round trip at all", ctx do

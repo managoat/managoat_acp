@@ -13,6 +13,7 @@ defmodule Managoat.ACP.Peer.State do
     images: [],
     mcp_servers: [],
     model: nil,
+    model_selection: %{result: %{}, effective: nil, source: nil},
     client_capabilities: nil,
     # The effective per-tool permission policy for this turn (#939). Already
     # merged and clamped by `Permissions.effective/2` before it gets here —
@@ -83,7 +84,7 @@ defmodule Managoat.ACP.Peer do
   So the peer outlives its prompt. After the prompt's response it reports
   `{:done, stop, usage}` and moves to `:idle`, where the owner may send the
   next turn with `prompt/3` on the same connection — no second `initialize`,
-  no `session/resume`, no model pin. Updates that arrive while idle are still
+  no `session/resume`, model selection before each prompt. Updates that arrive while idle are still
   reported as `{:lines, "acp", …}`; an autonomous cycle (a background task's
   follow-up) is marked at its end by `{:cycle_end, kind}` when the adapter's
   `usage_update` carries an origin from its autonomous set. The owner decides
@@ -178,7 +179,7 @@ defmodule Managoat.ACP.Peer do
           {:lines, stream :: String.t(), data :: String.t()}
           | {:session, String.t()}
           | {:prompt_sent, pos_integer()}
-          | {:model_rejected, requested :: String.t(), detail :: String.t()}
+          | {:model_selected, String.t() | nil, String.t() | nil, String.t() | nil}
           | {:handshake_ms, non_neg_integer(), method :: String.t()}
           | {:done, stop_reason :: String.t(), usage :: map() | nil}
           | {:cycle_end, kind :: String.t()}
@@ -235,14 +236,20 @@ defmodule Managoat.ACP.Peer do
   answered and the peer stayed up (#817).
 
   Reuses the session already open on this connection: no handshake, no
-  `session/resume`, no model pin. Reports `{:prompt_sent, id}` exactly as the
+  `session/resume`, model selection before each prompt. Reports `{:prompt_sent, id}` exactly as the
   first prompt did, so the reattach contract is unchanged. Refused with
   `{:error, {:not_idle, phase}}` while a prompt is outstanding or the
   connection is still being set up — never a silent second prompt on the wire.
   """
   @spec prompt(pid(), String.t(), [map()]) :: :ok | {:error, {:not_idle, atom()}}
   def prompt(pid, prompt, images \\ []) when is_binary(prompt) do
-    GenServer.call(pid, {:prompt, prompt, images})
+    prompt(pid, prompt, images, [])
+  end
+
+  @doc "Send a turn with an updated model; selection completes before the prompt is written."
+  @spec prompt(pid(), String.t(), [map()], keyword()) :: :ok | {:error, {:not_idle, atom()}}
+  def prompt(pid, prompt, images, opts) when is_binary(prompt) do
+    GenServer.call(pid, {:prompt, prompt, images, opts})
   end
 
   @doc """
@@ -416,15 +423,22 @@ defmodule Managoat.ACP.Peer do
   end
 
   @impl true
-  def handle_call({:prompt, prompt, images}, _from, %State{phase: :idle} = state) do
-    state = send_prompt(%{state | prompt: prompt, images: images})
+  def handle_call({:prompt, prompt, images, opts}, _from, %State{phase: :idle} = state) do
+    state = %{
+      state
+      | prompt: prompt,
+        images: images,
+        model: Keyword.get(opts, :model, state.model)
+    }
+
+    state = pin_model_then_prompt(state, state.model_selection.result)
 
     if state.phase == :failed,
       do: {:reply, {:error, {:not_idle, :failed}}, state},
       else: {:reply, :ok, state}
   end
 
-  def handle_call({:prompt, _prompt, _images}, _from, state) do
+  def handle_call({:prompt, _prompt, _images, _opts}, _from, state) do
     {:reply, {:error, {:not_idle, state.phase}}, state}
   end
 
@@ -512,19 +526,11 @@ defmodule Managoat.ACP.Peer do
     end
   end
 
-  # A model we could not pin is not worth failing a turn over — but it is worth
-  # the tenant seeing, because the alternative is their agent quietly running a
-  # model they did not choose.
-  #
-  # Reported upward rather than written to `stderr` (#724). stderr is the one
-  # stream every protocol client filters out: `?streams=acp,stage` drops it,
-  # and `fountain acp` treats it as the adapter's own noise. So the warning was
-  # invisible to exactly the surfaces that had no other way to know — the
-  # owner turns this into a stage event, which every surface renders.
-  defp handle_message({:error_response, _id, error}, %State{phase: :setting_model} = state) do
-    state
-    |> report_model_rejected(error)
-    |> send_prompt()
+  # A refusal must stop before inference; the host cannot retract bytes already written.
+  defp handle_message({:error_response, id, error}, %State{phase: :setting_model} = state)
+       when is_map_key(state.pending, id) do
+    {_tag, state} = pop_pending(state, id)
+    fail(state, {:model_selection_failed, state.model, error_detail(error)})
   end
 
   # Attached mid-turn: an error for an id we never sent is a replay of one the
@@ -793,8 +799,28 @@ defmodule Managoat.ACP.Peer do
     })
   end
 
-  # The model was pinned (or refused); either way the turn goes ahead.
-  defp handle_response(:set_model, _result, state), do: send_prompt(state)
+  defp handle_response(:set_model, result, state) do
+    effective = current_model(result)
+
+    if is_binary(effective) and effective != state.model do
+      fail(
+        state,
+        {:model_selection_failed, state.model,
+         "Runtime confirmed a different model: #{effective}"}
+      )
+    else
+      source = if effective, do: "runtime", else: "selection_ack"
+
+      send_prompt(%{
+        state
+        | model_selection: %{
+            state.model_selection
+            | effective: effective || state.model,
+              source: source
+          }
+      })
+    end
+  end
 
   # Authenticated; open (or reopen) the session.
   defp handle_response(:authenticate, _result, state), do: start_session(state)
@@ -967,9 +993,20 @@ defmodule Managoat.ACP.Peer do
   # the agent said it has one, so a runtime with no model concept is left alone
   # rather than being handed a method it never offered.
   defp pin_model_then_prompt(state, result) do
+    state = %{state | model_selection: %{state.model_selection | result: result}}
+
     cond do
       is_nil(state.model) or state.model == "" ->
-        send_prompt(state)
+        effective = state.model_selection.effective || current_model(result)
+
+        send_prompt(%{
+          state
+          | model_selection: %{
+              state.model_selection
+              | effective: effective,
+                source: state.model_selection.source || "runtime"
+            }
+        })
 
       model_configurable?(result) ->
         send_request(%{state | phase: :setting_model}, :set_model, "session/set_config_option", %{
@@ -985,12 +1022,11 @@ defmodule Managoat.ACP.Peer do
         })
 
       true ->
-        state
-        |> persist("stderr", [
-          "acp: this runtime does not expose model selection over ACP; ",
-          "#{state.model} was not applied and its default is in use\n"
-        ])
-        |> send_prompt()
+        fail(
+          state,
+          {:model_selection_failed, state.model,
+           "Runtime does not expose model selection over ACP"}
+        )
     end
   end
 
@@ -1006,7 +1042,19 @@ defmodule Managoat.ACP.Peer do
     end
   end
 
+  defp current_model(result) do
+    options = Map.get(result, "configOptions", [])
+    option = Enum.find(options, %{}, &(Map.get(&1, "id") == "model"))
+    Map.get(option, "currentValue") || get_in(result, ["models", "currentModelId"])
+  end
+
   defp send_prompt(state) do
+    report(
+      state,
+      {:model_selected, state.model, state.model_selection.effective,
+       state.model_selection.source}
+    )
+
     params = %{
       sessionId: state.session_id,
       prompt: [%{type: "text", text: state.prompt} | image_blocks(state.images)]
@@ -1060,11 +1108,6 @@ defmodule Managoat.ACP.Peer do
       :ok -> state
       {:error, reason} -> fail(state, {:acp_write_failed, reason})
     end
-  end
-
-  defp report_model_rejected(state, error) do
-    report(state, {:model_rejected, state.model, error_detail(error)})
-    state
   end
 
   # Adapters put the useful sentence in different places: claude's is under

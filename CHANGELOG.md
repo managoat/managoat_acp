@@ -10,6 +10,17 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Changed
+
+- **Breaking:** explicit model selection now fails before inference when rejected,
+  unsupported, or confirmed as a different model. There is no default fallback.
+- `Peer.prompt/4` applies changed models on an existing session. Each prompt
+  reports requested/effective model and whether the evidence is runtime metadata
+  or an acknowledgement. Replaces the nonfatal `model_rejected` report.
+
+
 ## [0.1.2] - 2026-09-03
 
 ### Changed
