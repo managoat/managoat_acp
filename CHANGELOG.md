@@ -10,6 +10,20 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-09-07
+
+### Fixed
+
+- A variant qualifier on the confirmed model is no longer read as a
+  substitution. Claude confirms `opus[1m]` for the 1M-context build of the
+  model requested as `claude-opus-5`; dropping separators fused the qualifier
+  onto the family name (`opus1m` against `claudeopus5`), so the containment
+  comparison added in 0.2.2 still failed the turn on a model that answers
+  normally. The qualifier now comes off before the comparison. A qualifier on a
+  *different* family (`haiku[1m]` for `claude-opus-5`) still fails, and a
+  confirmation that is nothing but a qualifier (`[1m]`) still fails
+  (BinaryBourbon/fountain#1668).
+
 ## [0.2.2] - 2026-09-06
 
 ### Fixed

@@ -1093,8 +1093,26 @@ defmodule Managoat.ACP.Peer do
     a != "" and b != "" and (String.contains?(a, b) or String.contains?(b, a))
   end
 
+  # A runtime may also qualify its answer with a variant the request never
+  # named: claude confirms `opus[1m]` for the 1M-context build of the model
+  # asked for as `claude-opus-5`. Dropping separators fuses that qualifier onto
+  # the family name (`opus1m` against `claudeopus5`), which destroys the
+  # containment the comparison above depends on — so the fix for the strict
+  # equality outage failed the turn anyway, for a model that was working.
+  # The qualifier annotates the model; it does not name a different one, so it
+  # comes off before the comparison.
+  #
+  # Removed from both sides, which is symmetric and therefore does not detect a
+  # variant *downgrade* — asking for `opus[1m]` and being given plain `opus`
+  # reads as agreement. That is the same trade already made for the `sonnet`
+  # ambiguity above, and it is answered the same way: `effective` records what
+  # the runtime actually confirmed, so a reader can see the variant even though
+  # the comparison ignored it.
   defp normalise_model(model) when is_binary(model) do
-    model |> String.downcase() |> String.replace(~r/[^a-z0-9]/, "")
+    model
+    |> String.downcase()
+    |> String.replace(~r/[\[(][^\])]*[\])]/, "")
+    |> String.replace(~r/[^a-z0-9]/, "")
   end
 
   defp normalise_model(_), do: ""
