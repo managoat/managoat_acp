@@ -11,7 +11,7 @@ defmodule Managoat.ACP.Peer.State do
     :cwd,
     :started_mono,
     images: [],
-    mcp_servers: [],
+    session_options: %{mcp_servers: [], execution_limits: nil},
     model: nil,
     model_selection: %{result: %{}, effective: nil, source: nil},
     client_capabilities: nil,
@@ -158,7 +158,7 @@ defmodule Managoat.ACP.Peer do
   require Logger
 
   alias Managoat.ACP.Peer.State
-  alias Managoat.ACP.{Permissions, Protocol, Usage}
+  alias Managoat.ACP.{ExecutionLimits, Permissions, Protocol, Usage}
 
   # How long the replay has to stay quiet before we believe it is over, and how
   # long we will wait for that in total. See `handle_response(:load_session, …)`.
@@ -208,6 +208,11 @@ defmodule Managoat.ACP.Peer do
   `Managoat.ACP.Protocol.default_client_capabilities/0`), `:replay_quiet_ms`
   and `:replay_max_ms` (the `session/load` window), and `:attach`.
 
+  `:execution_limits` accepts a validated `Managoat.ACP.ExecutionLimits` value.
+  It is sent on session creation/load/resume and retained on this connection.
+  Invalid limits return an error before any handshake bytes are written. The
+  host owns compatible adapter selection, ceilings and durable accounting.
+
   `attach: prompt_id` skips the handshake and resumes a turn whose
   `session/prompt` (with that JSON-RPC id) is already outstanding on the
   transport — see the moduledoc. `:session_id` must be the live session's id
@@ -219,7 +224,11 @@ defmodule Managoat.ACP.Peer do
   @spec start(keyword()) :: GenServer.on_start()
   def start(opts) do
     _ = writer!(opts)
-    GenServer.start(__MODULE__, opts)
+
+    with {:ok, _limits} <-
+           ExecutionLimits.validate(Keyword.get(opts, :execution_limits)) do
+      GenServer.start(__MODULE__, opts)
+    end
   end
 
   @doc """
@@ -246,8 +255,13 @@ defmodule Managoat.ACP.Peer do
     prompt(pid, prompt, images, [])
   end
 
-  @doc "Send a turn with an updated model; selection completes before the prompt is written."
-  @spec prompt(pid(), String.t(), [map()], keyword()) :: :ok | {:error, {:not_idle, atom()}}
+  @doc """
+  Send a turn with an updated model; selection completes before the prompt is written.
+  An explicit `:execution_limits` must equal the existing connection limits.
+  Changed or malformed limits return an error without sending a prompt.
+  """
+  @spec prompt(pid(), String.t(), [map()], keyword()) ::
+          :ok | {:error, atom() | {:not_idle, atom()}}
   def prompt(pid, prompt, images, opts) when is_binary(prompt) do
     GenServer.call(pid, {:prompt, prompt, images, opts})
   end
@@ -316,7 +330,10 @@ defmodule Managoat.ACP.Peer do
       session_id: Keyword.fetch!(opts, :session_id),
       cwd: Keyword.get(opts, :cwd, "/home/sprite"),
       images: Keyword.get(opts, :images, []),
-      mcp_servers: Keyword.get(opts, :mcp_servers, []),
+      session_options: %{
+        mcp_servers: Keyword.get(opts, :mcp_servers, []),
+        execution_limits: Keyword.get(opts, :execution_limits)
+      },
       permission_policy: Keyword.get(opts, :permission_policy) || %{},
       pending_permission: restore_pending(Keyword.get(opts, :pending_permission)),
       model: Keyword.get(opts, :model),
@@ -424,18 +441,15 @@ defmodule Managoat.ACP.Peer do
 
   @impl true
   def handle_call({:prompt, prompt, images, opts}, _from, %State{phase: :idle} = state) do
-    state = %{
-      state
-      | prompt: prompt,
-        images: images,
-        model: Keyword.get(opts, :model, state.model)
-    }
+    requested = Keyword.get(opts, :execution_limits, state.session_options.execution_limits)
 
-    state = pin_model_then_prompt(state, state.model_selection.result)
-
-    if state.phase == :failed,
-      do: {:reply, {:error, {:not_idle, :failed}}, state},
-      else: {:reply, :ok, state}
+    with {:ok, limits} <- ExecutionLimits.validate(requested),
+         true <- limits == state.session_options.execution_limits do
+      prompt_on_connection(state, prompt, images, opts)
+    else
+      false -> {:reply, {:error, :acp_execution_limits_changed}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call({:prompt, _prompt, _images, _opts}, _from, state) do
@@ -855,7 +869,12 @@ defmodule Managoat.ACP.Peer do
   # The turn is over; the connection is not (#817). `:idle` is where the next
   # `prompt/3` is accepted, and where out-of-turn updates keep flowing up.
   defp handle_response(:prompt, result, state) do
-    stop = Map.get(result, "stopReason") || "end_turn"
+    stop =
+      case Map.get(result, "stopReason") do
+        reason when is_binary(reason) and byte_size(reason) > 0 -> reason
+        _ -> "unknown"
+      end
+
     report(state, {:done, stop, Usage.from_prompt_result(result)})
     %{state | phase: :idle}
   end
@@ -942,6 +961,21 @@ defmodule Managoat.ACP.Peer do
     is_map(meta) and Map.has_key?(meta, "api-key")
   end
 
+  defp prompt_on_connection(state, prompt, images, opts) do
+    state = %{
+      state
+      | prompt: prompt,
+        images: images,
+        model: Keyword.get(opts, :model, state.model)
+    }
+
+    state = pin_model_then_prompt(state, state.model_selection.result)
+
+    if state.phase == :failed,
+      do: {:reply, {:error, {:not_idle, :failed}}, state},
+      else: {:reply, :ok, state}
+  end
+
   # ── session setup ─────────────────────────────────────────────────────────
 
   defp start_session(%State{mode: :run} = state), do: start_new_session(state)
@@ -956,7 +990,10 @@ defmodule Managoat.ACP.Peer do
       %{state | phase: :starting_session},
       :new_session,
       "session/new",
-      %{cwd: state.cwd, mcpServers: state.mcp_servers}
+      ExecutionLimits.session_params(
+        %{cwd: state.cwd, mcpServers: state.session_options.mcp_servers},
+        state.session_options.execution_limits
+      )
     )
   end
 
@@ -972,7 +1009,15 @@ defmodule Managoat.ACP.Peer do
     # The adapter snapshots `{cwd, mcpServers}` per session and tears the
     # session down when they change, so omitting them here would read as
     # "the client removed every MCP server".
-    params = %{sessionId: state.session_id, cwd: state.cwd, mcpServers: state.mcp_servers}
+    params =
+      ExecutionLimits.session_params(
+        %{
+          sessionId: state.session_id,
+          cwd: state.cwd,
+          mcpServers: state.session_options.mcp_servers
+        },
+        state.session_options.execution_limits
+      )
 
     case resume_method(state) do
       "session/resume" ->

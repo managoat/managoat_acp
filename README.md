@@ -68,6 +68,37 @@ claims, not billing verification. Missing metadata means unqualified accounting.
 A metadata-only report has no token keys; it is not measured zero usage. Read
 named counters, not every value in the map. Older reports keep their original shape.
 
+## Execution limits
+
+Build a typed limit set and pass it as `execution_limits:` to `Peer.start/1`:
+
+```elixir
+{:ok, limits} = Managoat.ACP.ExecutionLimits.new(:claude, %{
+  max_model_turns: 8,
+  max_estimated_cost_usd: 1.5
+})
+```
+
+The fields map to the Claude Agent SDK's `maxTurns` and `maxBudgetUsd` options.
+Model turns are not HTTP requests; transport retries and subagent behavior are
+the SDK's. At least one field is required. Other adapters and arbitrary SDK
+options are refused. The peer sends the limits on session new/load/resume.
+Subsequent prompts retain the same limits; a changed `execution_limits:` option
+returns `{:error, :acp_execution_limits_changed}` without sending a prompt.
+
+These configure an SDK Query process, not a durable conversation budget.
+The host must select a compatible pinned adapter, enforce account ceilings,
+persist remaining allowances, and retain reservations when usage is uncertain.
+A recreated SDK process may reset accounting, and in-flight work may overshoot
+an estimated dollar limit. Reattachment carries the host's persisted snapshot
+but cannot attest to the already-running process's configuration. Before using
+changed limits on a warm adapter session, use a release containing
+[claude-agent-acp #1097](https://github.com/agentclientprotocol/claude-agent-acp/pull/1097),
+which remains an upstream prerequisite, or start a fresh adapter process.
+
+The peer forwards explicit stop reasons and available usage. Missing or malformed
+reasons become `"unknown"`; callers must not treat unknown or limit stops as success.
+
 ## The transport is a callback
 
 The peer's contract with the outside world is "bytes out by function, bytes in
