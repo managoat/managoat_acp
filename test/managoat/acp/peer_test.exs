@@ -381,6 +381,30 @@ defmodule Managoat.ACP.PeerTest do
                        }}}
     end
 
+    test "partial accounting survives the protocol without fabricated counters", ctx do
+      pid = start_peer(ctx, [])
+      %{"id" => init_id} = next_write()
+      send_response(pid, init_id, %{"agentCapabilities" => caps()})
+      %{"id" => new_id} = next_write()
+      send_response(pid, new_id, %{"sessionId" => "s"})
+      %{"id" => prompt_id} = next_write()
+
+      accounting = %{
+        "version" => 1,
+        "source" => "codex/thread-token-usage-delta",
+        "scope" => "root_thread_prompt",
+        "completeness" => "partial"
+      }
+
+      send_response(pid, prompt_id, %{
+        "stopReason" => "cancelled",
+        "usage" => nil,
+        "_meta" => %{"usageAccounting" => accounting}
+      })
+
+      assert_receive {:acp, _ref, {:done, "cancelled", %{"accounting" => ^accounting}}}
+    end
+
     test "an error response fails the turn", ctx do
       pid = start_peer(ctx, [])
       %{"id" => init_id} = next_write()
