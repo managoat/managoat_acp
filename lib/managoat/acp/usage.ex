@@ -9,16 +9,21 @@ defmodule Managoat.ACP.Usage do
       `inputTokens`, `outputTokens`, `cachedReadTokens`, `cachedWriteTokens`,
       `totalTokens`, `thoughtTokens`. claude-agent-acp ≥ 0.6x fills it with
       the turn's accumulated API usage (reset when the turn starts) and
-      codex-acp with the thread's last token count;
+      older codex-acp versions with the thread's last token count;
     * `_meta.quota.token_count` — gemini-cli's own place for it, snake-cased
       and outside the protocol. See `from_meta_quota/1`;
     * `_meta.inputTokens` / `_meta.outputTokens` — where an adapter put it
       before the field had a name.
 
-  The result is one flat, string-keyed map (so it can go straight into a
-  JSON column): `%{"input" => n, "output" => n}` plus `"cache_read"` /
+  The result is a string-keyed map (so it can go straight into a JSON column): `%{"input" => n, "output" => n}` plus `"cache_read"` /
   `"cache_write"` when reported. `nil` when the response carries none of them — a turn without a
   usage, not a zero one.
+
+  An adapter's `_meta.usageAccounting` is preserved as `"accounting"`, with
+  only `version`, `source`, `scope`, and `completeness`. These are the adapter's
+  claims, not independently verified billing. A metadata-only result carries
+  no token keys. Missing or invalid metadata stays absent; historical reports
+  gain no invented scope or completeness.
 
   Deliberately *not* derived from the `usage_update` notifications that
   stream during a turn: those are context-window occupancy (`used` / `size`)
@@ -27,13 +32,50 @@ defmodule Managoat.ACP.Usage do
   when the turn ends.
   """
 
-  @type t :: %{required(String.t()) => non_neg_integer()}
+  @type accounting :: %{
+          required(String.t()) => pos_integer() | String.t()
+        }
+  @type t :: %{optional(String.t()) => non_neg_integer() | accounting()}
 
   @doc "The turn's usage from a `session/prompt` result, or nil."
   @spec from_prompt_result(map() | nil) :: t() | nil
-  def from_prompt_result(%{"usage" => %{} = usage}), do: normalize(usage)
-  def from_prompt_result(%{"_meta" => %{} = meta}), do: from_meta_quota(meta) || normalize(meta)
+  def from_prompt_result(%{} = result) do
+    counts = prompt_counts(result)
+
+    case accounting_from_prompt_result(result) do
+      nil -> counts
+      accounting -> Map.put(counts || %{}, "accounting", accounting)
+    end
+  end
+
   def from_prompt_result(_), do: nil
+
+  defp prompt_counts(%{"usage" => %{} = usage}), do: normalize(usage)
+  defp prompt_counts(%{"_meta" => %{} = meta}), do: from_meta_quota(meta) || normalize(meta)
+  defp prompt_counts(_), do: nil
+
+  defp accounting_from_prompt_result(%{
+         "_meta" => %{
+           "usageAccounting" => %{
+             "version" => version,
+             "source" => source,
+             "scope" => scope,
+             "completeness" => completeness
+           }
+         }
+       })
+       when is_integer(version) and version > 0 and is_binary(source) and
+              byte_size(source) in 1..256 and is_binary(scope) and byte_size(scope) in 1..256 and
+              completeness in ["reported", "partial"] do
+    %{
+      "version" => version,
+      "source" => source,
+      "scope" => scope,
+      "completeness" => completeness
+    }
+  end
+
+  defp accounting_from_prompt_result(_), do: nil
 
   @doc """
   gemini-cli's usage, from `_meta.quota.token_count`, or nil.

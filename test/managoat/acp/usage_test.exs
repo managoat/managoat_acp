@@ -34,6 +34,73 @@ defmodule Managoat.ACP.UsageTest do
              %{"input" => 0, "output" => 5}
   end
 
+  describe "accounting metadata" do
+    @accounting %{
+      "version" => 1,
+      "source" => "codex/thread-token-usage-delta",
+      "scope" => "root_thread_prompt",
+      "completeness" => "reported"
+    }
+
+    test "preserves the adapter's accounting claim with its observed counts" do
+      assert Usage.from_prompt_result(%{
+               "usage" => %{"inputTokens" => 10, "outputTokens" => 4, "cachedReadTokens" => 8},
+               "_meta" => %{"usageAccounting" => @accounting}
+             }) == %{"input" => 10, "output" => 4, "cache_read" => 8, "accounting" => @accounting}
+    end
+
+    test "retains partial metadata without inventing absent token counts" do
+      partial = %{@accounting | "completeness" => "partial"}
+
+      assert Usage.from_prompt_result(%{
+               "usage" => nil,
+               "stopReason" => "cancelled",
+               "_meta" => %{"usageAccounting" => partial}
+             }) == %{"accounting" => partial}
+    end
+
+    test "keeps known partial counts and excludes unrelated metadata" do
+      partial = %{@accounting | "completeness" => "partial"}
+
+      assert Usage.from_prompt_result(%{
+               "usage" => %{"inputTokens" => 10, "outputTokens" => 4},
+               "_meta" => %{
+                 "secret" => "never copy this",
+                 "usageAccounting" => Map.put(partial, "debug", "never copy this either")
+               }
+             }) == %{"input" => 10, "output" => 4, "accounting" => partial}
+    end
+
+    test "invalid or unsupported claims do not qualify otherwise valid counts" do
+      invalid = [
+        nil,
+        [],
+        %{},
+        %{@accounting | "version" => 0},
+        %{@accounting | "version" => true},
+        %{@accounting | "version" => 1.0},
+        %{@accounting | "source" => ""},
+        %{@accounting | "source" => String.duplicate("x", 257)},
+        %{@accounting | "scope" => []},
+        %{@accounting | "completeness" => "complete"}
+      ]
+
+      for claim <- invalid do
+        assert Usage.from_prompt_result(%{
+                 "usage" => %{"inputTokens" => 1, "outputTokens" => 2},
+                 "_meta" => %{"usageAccounting" => claim}
+               }) == %{"input" => 1, "output" => 2}
+      end
+    end
+
+    test "an unfamiliar version is preserved, not certified as a known contract" do
+      claim = %{@accounting | "version" => 2, "source" => "future-adapter", "scope" => "session"}
+
+      assert Usage.from_prompt_result(%{"_meta" => %{"usageAccounting" => claim}}) ==
+               %{"accounting" => claim}
+    end
+  end
+
   describe "gemini's _meta.quota (quirk :gemini_usage_in_meta_quota)" do
     # Verbatim from gemini-cli's `packages/cli/src/acp/acpSession.ts`, which
     # returns this on every `session/prompt` outcome but `cancelled`.

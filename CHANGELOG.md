@@ -10,6 +10,15 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-07
+
+### Changed
+
+- Usage reports preserve validated adapter accounting metadata under `"accounting"`.
+  This extends the map beyond numeric values. Metadata-only reports have no token
+  keys, so consumers must read named counters instead of summing every map value.
+  Legacy reports are unchanged. Missing metadata does not imply complete usage.
+
 ## [0.2.3] - 2026-09-07
 
 ### Fixed

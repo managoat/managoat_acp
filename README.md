@@ -60,6 +60,14 @@ def handle_info({:acp, ref, {:done, stop_reason, usage}}, state), do: close_turn
 | `Managoat.ACP.Tracer` | `tool_call` / `tool_call_update` as child spans of a turn span, with byte counts for text and thinking. Only the OpenTelemetry API is a dependency; with no SDK started, every call is a no-op. |
 | `Managoat.ACP.Testing.ScriptedAgent` | An agent inside the BEAM: answers the handshake, streams scripted updates, asks for a permission when told to. Ships in `lib/` so a host's tests can drive a real peer without a sandbox or a stub. |
 
+## Usage accounting
+
+The done message's usage map can include `"accounting"`: the adapter's version,
+source, scope, and completeness (`"reported"` or `"partial"`). These are provider
+claims, not billing verification. Missing metadata means unqualified accounting.
+A metadata-only report has no token keys; it is not measured zero usage. Read
+named counters, not every value in the map. Older reports keep their original shape.
+
 ## The transport is a callback
 
 The peer's contract with the outside world is "bytes out by function, bytes in
