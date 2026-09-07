@@ -1252,11 +1252,18 @@ defmodule Managoat.ACP.PeerTest do
     # designation. Strict equality read that as a substitution and failed the
     # turn, which took down every claude agent on an instance; codex, which
     # echoes the id verbatim, was unaffected and hid it.
+    # The bracketed cases are a variant qualifier, not a second model: claude
+    # confirms `opus[1m]` for the 1M-context build of `claude-opus-5`. Dropping
+    # separators fused it into `opus1m`, so the fix above for strict equality
+    # still failed the turn on a model that answers perfectly well (#8).
     for {requested, confirmed} <- [
           {"claude-opus-5", "opus"},
           {"claude-sonnet-5", "sonnet"},
           {"claude-haiku-4-5", "haiku"},
-          {"gpt-6-astra", "gpt-6-astra"}
+          {"gpt-6-astra", "gpt-6-astra"},
+          {"claude-opus-5", "opus[1m]"},
+          {"claude-opus-5", "claude-opus-5[1m]"},
+          {"claude-sonnet-5", "sonnet (1m)"}
         ] do
       test "#{requested} confirmed as #{confirmed} is the same model", ctx do
         pid = start_peer(ctx, model: unquote(requested))
@@ -1293,6 +1300,42 @@ defmodule Managoat.ACP.PeerTest do
 
       assert_receive {:acp, _, {:failed, {:model_selection_failed, "claude-opus-5", detail}}}
       assert detail =~ "claude-haiku-4-5"
+      refute_receive {:wrote, _}, 50
+    end
+
+    # Stripping the variant qualifier must not swallow the family with it: a
+    # different model wearing one is still a substitution.
+    test "a variant qualifier on a different family still fails", ctx do
+      pid = start_peer(ctx, model: "claude-opus-5")
+      %{"id" => init_id} = next_write()
+      send_response(pid, init_id, %{"agentCapabilities" => caps()})
+      %{"id" => new_id} = next_write()
+      send_response(pid, new_id, caps_with_model_option())
+      %{"id" => set_id} = next_write()
+
+      send_response(pid, set_id, %{
+        "configOptions" => [%{"id" => "model", "currentValue" => "haiku[1m]"}]
+      })
+
+      assert_receive {:acp, _, {:failed, {:model_selection_failed, "claude-opus-5", detail}}}
+      assert detail =~ "haiku[1m]"
+      refute_receive {:wrote, _}, 50
+    end
+
+    # A confirmation that is nothing but a qualifier names no model at all.
+    test "a bare qualifier is not a confirmation", ctx do
+      pid = start_peer(ctx, model: "claude-opus-5")
+      %{"id" => init_id} = next_write()
+      send_response(pid, init_id, %{"agentCapabilities" => caps()})
+      %{"id" => new_id} = next_write()
+      send_response(pid, new_id, caps_with_model_option())
+      %{"id" => set_id} = next_write()
+
+      send_response(pid, set_id, %{
+        "configOptions" => [%{"id" => "model", "currentValue" => "[1m]"}]
+      })
+
+      assert_receive {:acp, _, {:failed, {:model_selection_failed, "claude-opus-5", _}}}
       refute_receive {:wrote, _}, 50
     end
 
