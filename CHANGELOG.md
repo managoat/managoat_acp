@@ -10,6 +10,21 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-07
+
+### Added
+
+- Typed Claude SDK execution limits on peer creation, session load and resume.
+  Unknown adapters/options and invalid values are refused before handshake.
+  A warm peer rejects changed limits instead of silently keeping old values.
+  The host still owns adapter pins, account ceilings and durable budgets.
+
+### Changed
+
+- Missing, empty or malformed prompt stop reasons now report `"unknown"`,
+  preserving available usage, instead of inventing `"end_turn"`. Consumers must
+  treat unknown stops as incomplete; this changes malformed-response behavior.
+
 ## [0.3.0] - 2026-09-07
 
 ### Changed
