@@ -10,6 +10,18 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-08
+
+### Added
+
+- `:auth` on `Peer.start/1`: which advertised method to `authenticate` with.
+  `:api_key` (the default, unchanged) picks the first method whose `_meta`
+  names an api key; `:none` never authenticates, for an agent whose
+  credentials the host has already put where it reads them; a method id
+  picks that one when advertised and nothing otherwise. Needed for codex-acp
+  with an externally managed ChatGPT `auth.json`, whose api-key method would
+  rewrite that file from an env var.
+
 ## [0.4.0] - 2026-09-07
 
 ### Added
