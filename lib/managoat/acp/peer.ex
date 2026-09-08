@@ -37,6 +37,10 @@ defmodule Managoat.ACP.Peer.State do
     replay_until_ms: nil,
     capabilities: %{},
     auth_methods: [],
+    # Which advertised method to `authenticate` with: `:api_key` (the first
+    # method whose `_meta` names an api key), `:none` (never authenticate;
+    # the agent's ambient credentials are the session's), or a method id.
+    auth: :api_key,
     authenticated?: false,
     # `attach: prompt_id` mode: joined a turn already in flight, so replayed
     # responses to ids we never sent are expected, and the first chunk may
@@ -206,7 +210,12 @@ defmodule Managoat.ACP.Peer do
   `Managoat.ACP.Permissions`), `:pending_permission` (a held request handed
   back on reattach), `:client_capabilities` (default
   `Managoat.ACP.Protocol.default_client_capabilities/0`), `:replay_quiet_ms`
-  and `:replay_max_ms` (the `session/load` window), and `:attach`.
+  and `:replay_max_ms` (the `session/load` window), `:auth` (which
+  advertised method to `authenticate` with: `:api_key`, the default, picks
+  the first method whose `_meta` names an api key; `:none` never
+  authenticates, for an agent whose credentials the host has already put
+  where it reads them; a method id picks that one when advertised), and
+  `:attach`.
 
   `:execution_limits` accepts a validated `Managoat.ACP.ExecutionLimits` value.
   It is sent on session creation/load/resume and retained on this connection.
@@ -341,6 +350,7 @@ defmodule Managoat.ACP.Peer do
         Keyword.get(opts, :client_capabilities) || Protocol.default_client_capabilities(),
       replay_quiet_ms: Keyword.get(opts, :replay_quiet_ms, @replay_quiet_ms),
       replay_max_ms: Keyword.get(opts, :replay_max_ms, @replay_max_ms),
+      auth: Keyword.get(opts, :auth, :api_key),
       started_mono: System.monotonic_time(:millisecond)
     }
 
@@ -931,6 +941,21 @@ defmodule Managoat.ACP.Peer do
 
     String.contains?(text, "model") and
       Enum.any?(@model_gone_phrases, &String.contains?(text, &1))
+  end
+
+  # `:none`: the host has put credentials where the agent reads them itself
+  # (codex-acp with an externally managed ChatGPT `auth.json`), and the
+  # api-key method would *replace* them — codex-acp's runs
+  # `accountLogin({type: "apiKey"})` from an env var, rewriting the file.
+  # Measured 2026-09-08. So the host says "do not", and the session opens on
+  # what is there.
+  defp auth_method(%{auth: :none}), do: nil
+
+  # A named method: only when the agent advertises it; a name the agent does
+  # not know would be refused, and a refusal on a headless sandbox is the
+  # turn's end.
+  defp auth_method(%{auth: id} = state) when is_binary(id) do
+    if Enum.any?(state.auth_methods, &(Map.get(&1, "id") == id)), do: id, else: nil
   end
 
   # Prefer a method naming an API key in its `_meta`: that is what an agent
