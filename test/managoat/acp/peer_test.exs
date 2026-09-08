@@ -1428,6 +1428,53 @@ defmodule Managoat.ACP.PeerTest do
       assert %{"method" => "session/new"} = next_write()
     end
 
+    # codex-acp advertises `api-key` and `chat-gpt`. Its api-key method reads a
+    # key from the env and runs `accountLogin({type: "apiKey"})`, which
+    # rewrites `~/.codex/auth.json` — and a host that has written an
+    # externally managed ChatGPT login there (chatgptAuthTokens) loses it.
+    # Measured 2026-09-08.
+    @codex_auth [
+      %{
+        "id" => "api-key",
+        "name" => "API Key",
+        "_meta" => %{"api-key" => %{"provider" => "openai"}}
+      },
+      %{"id" => "chat-gpt", "name" => "ChatGPT"}
+    ]
+
+    test "auth: :none opens the session on the agent's own credentials", ctx do
+      pid = start_peer(ctx, auth: :none)
+      init_with_auth(pid, @codex_auth)
+
+      assert %{"method" => "session/new"} = next_write()
+    end
+
+    test "auth: :none does not authenticate on a refusal either", ctx do
+      pid = start_peer(ctx, auth: :none)
+      init_with_auth(pid, @codex_auth)
+
+      assert %{"method" => "session/new", "id" => new_id} = next_write()
+      refuse(pid, new_id, "Authentication required")
+
+      # No authenticate: the failure is reported as the turn's, not retried
+      # into a method that would overwrite what the host wrote.
+      refute_receive {:wrote, _}, 100
+    end
+
+    test "a named method is used when advertised, and nothing when it is not", ctx do
+      pid = start_peer(ctx, auth: "chat-gpt")
+      init_with_auth(pid, @codex_auth)
+
+      assert %{"method" => "authenticate", "id" => auth_id, "params" => params} = next_write()
+      assert params["methodId"] == "chat-gpt"
+      send_response(pid, auth_id, %{})
+      assert %{"method" => "session/new"} = next_write()
+
+      pid = start_peer(ctx, auth: "not-advertised")
+      init_with_auth(pid, @codex_auth)
+      assert %{"method" => "session/new"} = next_write()
+    end
+
     test "an agent advertising no methods is never sent authenticate", ctx do
       # claude's adapter returns authMethods: [] (measured), so this must be a
       # complete no-op for it rather than a guessed method.

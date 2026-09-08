@@ -10,6 +10,21 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-08
+
+Backport of the `:auth` option from 0.4.1, for hosts still on
+`managoat_runtimes` 0.3.x (which pins `managoat_acp ~> 0.3.0`).
+
+### Added
+
+- `:auth` on `Peer.start/1`: which advertised method to `authenticate` with.
+  `:api_key` (the default, unchanged) picks the first method whose `_meta`
+  names an api key; `:none` never authenticates, for an agent whose
+  credentials the host has already put where it reads them; a method id
+  picks that one when advertised and nothing otherwise. Needed for codex-acp
+  with an externally managed ChatGPT `auth.json`, whose api-key method would
+  rewrite that file from an env var.
+
 ## [0.3.0] - 2026-09-07
 
 ### Changed
@@ -66,7 +81,6 @@ the package ships without a bump fails the release gate.
 - `Peer.prompt/4` applies changed models on an existing session. Each prompt
   reports requested/effective model and whether the evidence is runtime metadata
   or an acknowledgement. Replaces the nonfatal `model_rejected` report.
-
 
 ## [0.1.2] - 2026-09-03
 
