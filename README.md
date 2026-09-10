@@ -287,8 +287,8 @@ gated by this evaluation.
 
 ## Origins
 
-Extracted from [Fountain](https://github.com/BinaryBourbon/fountain) under
-[ADR 0037](https://github.com/BinaryBourbon/fountain/blob/main/decisions/0037-component-libraries.md)
+Extracted from [Fountain](https://github.com/managoat/fountain) under
+[ADR 0037](https://github.com/managoat/fountain/blob/main/decisions/0037-component-libraries.md)
 (issue #1339), where the peer was built as gate 2 of ADR 0014 and the policy
 as gate 3. The issue numbers in the code are that repository's; each marks an
 agent behaviour that was measured live and that the code is shaped around.

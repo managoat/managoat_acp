@@ -58,7 +58,7 @@ the package ships without a bump fails the release gate.
   normally. The qualifier now comes off before the comparison. A qualifier on a
   *different* family (`haiku[1m]` for `claude-opus-5`) still fails, and a
   confirmation that is nothing but a qualifier (`[1m]`) still fails
-  (BinaryBourbon/fountain#1668).
+  (managoat/fountain#1668).
 
 ## [0.2.2] - 2026-09-06
 
@@ -112,7 +112,7 @@ the package ships without a bump fails the release gate.
   extension at `_meta.quota.token_count`, snake-cased
   (google-gemini/gemini-cli#24280, closed with no plans to add the standard
   fields), so every gemini turn returned `nil` — a host billing from this
-  figure billed nothing at all (BinaryBourbon/fountain#1459). The new
+  figure billed nothing at all (managoat/fountain#1459). The new
   `Usage.from_meta_quota/1` reads that shape; the protocol's own `usage`
   still wins where both are present.
 
@@ -120,4 +120,4 @@ the package ships without a bump fails the release gate.
 
 ### Added
 
-- Extracted from Fountain (BinaryBourbon/fountain#1358).
+- Extracted from Fountain (managoat/fountain#1358).
