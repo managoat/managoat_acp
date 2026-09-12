@@ -60,6 +60,20 @@ def handle_info({:acp, ref, {:done, stop_reason, usage}}, state), do: close_turn
 | `Managoat.ACP.Tracer` | `tool_call` / `tool_call_update` as child spans of a turn span, with byte counts for text and thinking. Only the OpenTelemetry API is a dependency; with no SDK started, every call is a no-op. |
 | `Managoat.ACP.Testing.ScriptedAgent` | An agent inside the BEAM: answers the handshake, streams scripted updates, asks for a permission when told to. Ships in `lib/` so a host's tests can drive a real peer without a sandbox or a stub. |
 
+## Recovering a missing session
+
+After a `{:failed, {:acp_error, tag, error}}` report for `:resume_session` or
+`:load_session`, a host that recognizes a missing session may call
+`Peer.restart_session(peer)`. This sends `session/new` on the same initialized
+connection and then sends the original prompt and images. It preserves the
+writer, session options, execution limits, request IDs and monotonic start
+accounting. It never spawns a process or resets the host's deadline.
+
+The host decides whether context loss is acceptable and reports it to its user.
+It must retain its admitted turn, retry budget, accounting and write fences.
+Other failures, a prompt already sent, and a failed fresh session are not
+restartable; the call returns `{:error, :not_restartable}` without writing.
+
 ## Usage accounting
 
 The done message's usage map can include `"accounting"`: the adapter's version,
@@ -147,7 +161,7 @@ nothing but protocol; these are the whole contract.
 | `{:permission_denied, tool, verdict}` | the policy said `auto_deny` (or a value that is not a verdict) | Audit it. Allows are deliberately not reported. |
 | `{:cycle_end, kind}` | a `usage_update` whose origin is in the adapter's autonomous set (a background task's follow-up) | Close whatever turn the owner opened for the out-of-turn lines. |
 | `{:done, stop_reason, usage}` | the `session/prompt` response | The turn is over and the peer is `:idle`; `usage` is `Usage.t()` or `nil`. The next `prompt/3` reuses the connection. |
-| `{:failed, reason}` | a write failed, a request errored, or the session could not be set up | Terminal for the peer's writing. Close the turn, then `Peer.close/1`. Reasons: `{:acp_write_failed, reason}`, `{:acp_error, tag, error}`, `{:acp_no_session_id, result}`, `:acp_resume_without_session_id`, `:acp_agent_cannot_resume`, and two the owner can act on, `{:oauth_org_not_allowed, detail}` and `{:model_unavailable, model, detail}`. |
+| `{:failed, reason}` | a write failed, a request errored, or the session could not be set up | Writing stops. A failed resume/load before any prompt may use [missing-session recovery](#recovering-a-missing-session); otherwise close the turn, then `Peer.close/1`. Reasons: `{:acp_write_failed, reason}`, `{:acp_error, tag, error}`, `{:acp_no_session_id, result}`, `:acp_resume_without_session_id`, `:acp_agent_cannot_resume`, and two the owner can act on, `{:oauth_org_not_allowed, detail}` and `{:model_unavailable, model, detail}`. |
 
 Ten payloads, all from `Peer`. The two failure reasons at the end are worth
 matching on: one is the runtime's OAuth token belonging to an organisation

@@ -28,6 +28,7 @@ defmodule Managoat.ACP.Peer.State do
     next_id: 1,
     pending: %{},
     phase: :initializing,
+    failed_session_setup: nil,
     replay_discard?: false,
     # Both set from opts in `init/1`; the defaults live on the peer module.
     replay_quiet_ms: nil,
@@ -40,8 +41,7 @@ defmodule Managoat.ACP.Peer.State do
     # (the first method whose `_meta` names an api key), `:none` (never
     # authenticate; the agent's ambient credentials are the session's), or a
     # method id. `:methods` is what the agent advertised on `initialize`.
-    auth: %{choice: :api_key, methods: []},
-    authenticated?: false,
+    auth: %{choice: :api_key, methods: [], authenticated?: false},
     # `attach: prompt_id` mode: joined a turn already in flight, so replayed
     # responses to ids we never sent are expected, and the first chunk may
     # start mid-line.
@@ -276,6 +276,23 @@ defmodule Managoat.ACP.Peer do
   end
 
   @doc """
+  Start a fresh session after a failed resume/load, on the same initialized connection.
+
+  The host decides whether the resumption error means its session is gone and
+  whether losing that context is acceptable. This call is allowed only after a
+  resume/load response failed before a prompt was sent. It retains the prompt,
+  images, model, permissions, MCP servers, execution limits, request sequence
+  and original monotonic start time. It sends `session/new`, without another
+  `initialize` or a new transport. A failed `session/new` cannot restart again.
+
+  The host still owns its retry budget, recovery notice and absolute execution
+  deadline. The writer remains the same, including any durable write fencing.
+  """
+  @spec restart_session(pid()) ::
+          :ok | {:error, :not_restartable | :acp_session_restart_failed}
+  def restart_session(pid), do: GenServer.call(pid, :restart_session)
+
+  @doc """
   Close the connection cleanly.
 
   The owner calls this when the transport stops being its own — the sandbox
@@ -350,7 +367,7 @@ defmodule Managoat.ACP.Peer do
         Keyword.get(opts, :client_capabilities) || Protocol.default_client_capabilities(),
       replay_quiet_ms: Keyword.get(opts, :replay_quiet_ms, @replay_quiet_ms),
       replay_max_ms: Keyword.get(opts, :replay_max_ms, @replay_max_ms),
-      auth: %{choice: Keyword.get(opts, :auth, :api_key), methods: []},
+      auth: %{choice: Keyword.get(opts, :auth, :api_key), methods: [], authenticated?: false},
       started_mono: System.monotonic_time(:millisecond)
     }
 
@@ -450,6 +467,32 @@ defmodule Managoat.ACP.Peer do
   end
 
   @impl true
+  def handle_call(
+        :restart_session,
+        _from,
+        %State{phase: :failed, failed_session_setup: tag} = state
+      )
+      when tag in [:resume_session, :load_session] do
+    state =
+      start_new_session(%{
+        state
+        | mode: :run,
+          session_id: nil,
+          phase: :starting_session,
+          failed_session_setup: nil,
+          replay_discard?: false,
+          replay_result: nil,
+          replay_last_ms: nil,
+          replay_until_ms: nil
+      })
+
+    result = if state.phase == :failed, do: {:error, :acp_session_restart_failed}, else: :ok
+    {:reply, result, state}
+  end
+
+  def handle_call(:restart_session, _from, state),
+    do: {:reply, {:error, :not_restartable}, state}
+
   def handle_call({:prompt, prompt, images, opts}, _from, %State{phase: :idle} = state) do
     requested = Keyword.get(opts, :execution_limits, state.session_options.execution_limits)
 
@@ -595,13 +638,13 @@ defmodule Managoat.ACP.Peer do
     {tag, state} = pop_pending(state, id)
 
     cond do
-      session_setup?(tag) and auth_error?(error) and not state.authenticated? and
+      session_setup?(tag) and auth_error?(error) and not state.auth.authenticated? and
           auth_method(state) ->
         method = auth_method(state)
         Logger.info("acp peer: #{tag} needs authentication; retrying with #{method}")
 
         send_request(
-          %{state | authenticated?: true},
+          %{state | auth: %{state.auth | authenticated?: true}},
           :authenticate,
           "authenticate",
           %{methodId: method}
@@ -802,9 +845,14 @@ defmodule Managoat.ACP.Peer do
         start_session(state)
 
       chosen ->
-        send_request(%{state | authenticated?: true}, :authenticate, "authenticate", %{
-          methodId: chosen
-        })
+        send_request(
+          %{state | auth: %{state.auth | authenticated?: true}},
+          :authenticate,
+          "authenticate",
+          %{
+            methodId: chosen
+          }
+        )
     end
   end
 
@@ -1276,7 +1324,18 @@ defmodule Managoat.ACP.Peer do
 
   defp fail(state, reason) do
     report(state, {:failed, reason})
-    %{state | phase: :failed}
+
+    failed_session_setup =
+      case {state.phase, reason} do
+        {:starting_session, {:acp_error, tag, _error}}
+        when tag in [:resume_session, :load_session] ->
+          tag
+
+        _ ->
+          nil
+      end
+
+    %{state | phase: :failed, failed_session_setup: failed_session_setup}
   end
 
   defp report(state, payload), do: send(state.owner, {:acp, state.ref, payload})
