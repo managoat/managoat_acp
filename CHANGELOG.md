@@ -10,6 +10,16 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-12
+
+### Added
+
+- `Peer.restart_session/1` lets a host recover a failed resume/load with
+  `session/new` on the same initialized connection, before any prompt was
+  sent. It preserves the pending input, session options, execution limits,
+  request sequence and original monotonic start time. The host retains its
+  retry policy, recovery notice, durable accounting and absolute deadline.
+
 ## [0.4.1] - 2026-09-08
 
 ### Added
