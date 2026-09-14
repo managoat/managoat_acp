@@ -10,6 +10,19 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-14
+
+### Added
+
+- `plan` transcript blocks with a full checklist in `body`, plus `Blocks.kinds/0`
+  and `Blocks.to_json/1`. Native ACP plans are no longer dropped.
+- Session-local reconstruction of Claude task tools and whole-list Codex
+  `update_plan`/`TodoWrite` calls. The peer annotates stored task frames with
+  snapshots so clients can render a single event without replaying earlier
+  deltas. Failed calls leave the checklist unchanged; native plans take
+  precedence. Session-load replay rebuilds state without duplicating history.
+  This is an additive block kind (managoat/fountain#1571).
+
 ## [0.4.2] - 2026-09-12
 
 ### Added
