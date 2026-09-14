@@ -20,7 +20,8 @@ defmodule Managoat.ACP.Blocks do
   | `tool_call` | `%{kind: :tool_use}` |
   | `tool_call_update` | `%{kind: :tool_result}` |
   | `user_message_chunk` | dropped — we already render the prompt |
-  | `plan`, `available_commands_update` | dropped — no equivalent yet |
+  | `plan` | `%{kind: :plan, body: entries}` (the full checklist) |
+  | `available_commands_update` | dropped — a UI affordance |
 
   ## Chunks are not messages
 
@@ -48,6 +49,20 @@ defmodule Managoat.ACP.Blocks do
   """
 
   alias Managoat.ACP.Protocol
+
+  @kinds ~w(text thinking tool_use tool_result permission_request raw plan)
+
+  @doc "Every block kind emitted by this library, as wire strings."
+  def kinds, do: @kinds
+
+  @doc "The wire form: string keys and kind, with error? renamed to error."
+  def to_json(block) do
+    Map.new(block, fn
+      {:kind, kind} -> {"kind", Atom.to_string(kind)}
+      {:error?, value} -> {"error", value}
+      {key, value} -> {Atom.to_string(key), value}
+    end)
+  end
 
   @terminal_statuses ~w(completed failed cancelled)
 
@@ -110,6 +125,14 @@ defmodule Managoat.ACP.Blocks do
   def from_update(update) when is_map(update), do: update_blocks(update)
   def from_update(_), do: []
 
+  defp update_blocks(%{"sessionUpdate" => "plan", "entries" => entries}) when is_list(entries) do
+    [%{kind: :plan, body: entries}]
+  end
+
+  defp update_blocks(%{"_meta" => %{"managoat_acp" => %{"plan" => entries}}}) do
+    if is_list(entries), do: [%{kind: :plan, body: entries}], else: []
+  end
+
   defp update_blocks(%{"sessionUpdate" => "agent_message_chunk", "content" => content}) do
     text_block(:text, content)
   end
@@ -144,7 +167,7 @@ defmodule Managoat.ACP.Blocks do
     ]
   end
 
-  # Non-terminal tool_call_update, user echo, plan, command list, and any
+  # Non-terminal tool_call_update, user echo, command list, and any
   # variant a future adapter version invents. Dropping an unknown variant is
   # deliberate: the legacy parsers render unrecognised lines as a `:raw` block,
   # which for a well-specified protocol would turn every new notification kind

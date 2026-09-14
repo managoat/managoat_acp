@@ -24,7 +24,7 @@ defmodule Managoat.ACP.Peer.State do
     # agent cannot proceed until it is answered — so a single slot is
     # enough. nil whenever nothing is outstanding.
     pending_permission: nil,
-    buffer: "",
+    transcript: %{buffer: "", plans: %Managoat.ACP.Plans{}},
     next_id: 1,
     pending: %{},
     phase: :initializing,
@@ -434,10 +434,10 @@ defmodule Managoat.ACP.Peer do
   end
 
   def handle_cast({:stdout, data}, state) do
-    {messages, buffer} = Protocol.feed(state.buffer, data)
+    {messages, buffer} = Protocol.feed(state.transcript.buffer, data)
 
     messages
-    |> Enum.reduce(%{state | buffer: buffer}, &handle_message/2)
+    |> Enum.reduce(put_in(state.transcript.buffer, buffer), &handle_message/2)
     |> noreply()
   end
 
@@ -478,6 +478,7 @@ defmodule Managoat.ACP.Peer do
         state
         | mode: :run,
           session_id: nil,
+          transcript: %{buffer: state.transcript.buffer, plans: %Managoat.ACP.Plans{}},
           phase: :starting_session,
           failed_session_setup: nil,
           replay_discard?: false,
@@ -588,6 +589,9 @@ defmodule Managoat.ACP.Peer do
   end
 
   defp handle_message({:notification, "session/update", params}, state) do
+    {params, plans} = Managoat.ACP.Plans.normalize(params, state.transcript.plans)
+    state = put_in(state.transcript.plans, plans)
+
     if state.replay_discard? do
       # Replay of history we already hold. Dropped, not persisted — see the
       # moduledoc. The timestamp is what the quiet period below measures.

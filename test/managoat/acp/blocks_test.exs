@@ -198,8 +198,8 @@ defmodule Managoat.ACP.BlocksTest do
   end
 
   describe "variants with no Fountain equivalent" do
-    test "plan, command lists and user echoes are dropped" do
-      for variant <- ["plan", "available_commands_update", "user_message_chunk"] do
+    test "command lists and user echoes are dropped" do
+      for variant <- ["available_commands_update", "user_message_chunk"] do
         assert [] =
                  update(%{
                    "sessionUpdate" => variant,

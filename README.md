@@ -210,9 +210,10 @@ emitted one block per chunk and left for the renderer to concatenate.
 | tool use | `%{kind: :tool_use, id: String.t(), name: String.t(), summary: String.t(), body: String.t()}` | `tool_call`; `name` is the title, else the kind, never empty; `summary` is the first location's path, else a preview of `rawInput` |
 | tool result | `%{kind: :tool_result, tool_id: String.t(), body: String.t(), error?: boolean()}` | `tool_call_update` with a terminal status (`completed`, `failed`, `cancelled`); in-flight updates produce nothing |
 | permission request | `%{kind: :permission_request, request_id: String.t(), name: String.t(), summary: String.t(), options: [map()]}` | `session/request_permission`; `options` is exactly what the agent offered, in its order |
+| plan | `%{kind: :plan, body: [map()]}` | ACP `plan.entries`, or a completed task tool reconstructed by the peer |
 | raw | `%{kind: :raw, body: String.t(), summary: "raw"}` | a line that is not JSON |
 
-`user_message_chunk`, `plan`, `available_commands_update`, `usage_update` and
+`user_message_chunk`, `available_commands_update`, `usage_update` and
 any variant a future adapter invents produce nothing: for a well-specified
 protocol, rendering every new notification kind as noise would be the bug.
 
@@ -234,6 +235,32 @@ Every frame the peer writes is also reported to the test process as
 `{:scripted_agent, :wrote, decoded}`. The library's own peer tests script the
 agent by hand, one frame at a time, because they are about the frames; the
 scripted agent is for a host's tests, which are about turns.
+
+`plan.body` is the full ordered checklist, including an empty list when cleared.
+Entries use string keys: `content`, `status` (`pending`, `in_progress`, or
+`completed`), and optional `priority`, `id`, and `activeForm`. Native ACP entries
+retain their fields. `Blocks.kinds/0` enumerates the emitted kinds and
+`Blocks.to_json/1` converts the block to the wire form.
+
+For adapters that expose task tools, the peer correlates `TaskCreate`,
+`TaskUpdate`, `TaskList`, and `TaskGet` by tool call ID and applies successful
+results to a session-local checklist. Create uses the returned task ID; list
+replaces the checklist, update can delete an entry, and get refreshes one entry.
+`TodoWrite` and Codex `update_plan` supply full lists. Tool identity comes from
+`_meta.claudeCode.toolName`, `name`, or an exact tool title. Structured JSON
+results and Claude's create/list acknowledgement text are supported; unreadable
+results remain ordinary tool results. Failed calls do not change the checklist.
+
+The peer preserves the task frames and annotates their update under
+`_meta.managoat_acp.plan`: a full list on success, or null for an in-flight task
+frame. Blocks reads that annotation, so each stored snapshot renders on its own,
+including paginated history and SSE replay. Native plans are authoritative;
+once one arrives, task tools no longer synthesize duplicate plan blocks.
+Session-load history rebuilds the checklist even while its lines are discarded.
+State persists across prompts on the same peer and resets for a fresh session.
+A reattachment with only a partial transport tail cannot recover tasks missing
+from that tail; a subsequent native plan or TaskList restores the full list.
+Historical unannotated task frames are unchanged by the stateless block reader.
 
 ## How this relates to acpex and agent_client_protocol
 
