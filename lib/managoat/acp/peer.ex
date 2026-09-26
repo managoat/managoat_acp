@@ -11,7 +11,7 @@ defmodule Managoat.ACP.Peer.State do
     :cwd,
     :started_mono,
     images: [],
-    session_options: %{mcp_servers: [], execution_limits: nil},
+    session_options: %{mcp_servers: [], additional_directories: [], execution_limits: nil},
     model: nil,
     model_selection: %{result: %{}, effective: nil, source: nil},
     client_capabilities: nil,
@@ -217,6 +217,15 @@ defmodule Managoat.ACP.Peer do
   where it reads them; a method id picks that one when advertised), and
   `:attach`.
 
+  `:additional_directories` is a list of absolute paths the agent may use
+  beyond `:cwd` — ACP's `additionalDirectories`, which codex-acp adds to its
+  sandbox's writable roots and claude-agent-acp to the SDK's. It is sent on
+  session creation/load/resume only when the agent advertises
+  `sessionCapabilities.additionalDirectories`, and left off otherwise, so a
+  runtime without the concept is never handed a field it did not offer. An
+  entry that is not an absolute path returns an error before any handshake
+  bytes are written.
+
   `:execution_limits` accepts a validated `Managoat.ACP.ExecutionLimits` value.
   It is sent on session creation/load/resume and retained on this connection.
   Invalid limits return an error before any handshake bytes are written. The
@@ -234,8 +243,8 @@ defmodule Managoat.ACP.Peer do
   def start(opts) do
     _ = writer!(opts)
 
-    with {:ok, _limits} <-
-           ExecutionLimits.validate(Keyword.get(opts, :execution_limits)) do
+    with :ok <- validate_directories(Keyword.get(opts, :additional_directories, [])),
+         {:ok, _limits} <- ExecutionLimits.validate(Keyword.get(opts, :execution_limits)) do
       GenServer.start(__MODULE__, opts)
     end
   end
@@ -358,6 +367,7 @@ defmodule Managoat.ACP.Peer do
       images: Keyword.get(opts, :images, []),
       session_options: %{
         mcp_servers: Keyword.get(opts, :mcp_servers, []),
+        additional_directories: Keyword.get(opts, :additional_directories, []),
         execution_limits: Keyword.get(opts, :execution_limits)
       },
       permission_policy: Keyword.get(opts, :permission_policy) || %{},
@@ -1072,10 +1082,7 @@ defmodule Managoat.ACP.Peer do
       %{state | phase: :starting_session},
       :new_session,
       "session/new",
-      ExecutionLimits.session_params(
-        %{cwd: state.cwd, mcpServers: state.session_options.mcp_servers},
-        state.session_options.execution_limits
-      )
+      session_params(state, %{cwd: state.cwd, mcpServers: state.session_options.mcp_servers})
     )
   end
 
@@ -1092,14 +1099,11 @@ defmodule Managoat.ACP.Peer do
     # session down when they change, so omitting them here would read as
     # "the client removed every MCP server".
     params =
-      ExecutionLimits.session_params(
-        %{
-          sessionId: state.session_id,
-          cwd: state.cwd,
-          mcpServers: state.session_options.mcp_servers
-        },
-        state.session_options.execution_limits
-      )
+      session_params(state, %{
+        sessionId: state.session_id,
+        cwd: state.cwd,
+        mcpServers: state.session_options.mcp_servers
+      })
 
     case resume_method(state) do
       "session/resume" ->
@@ -1118,6 +1122,28 @@ defmodule Managoat.ACP.Peer do
 
       _ ->
         fail(state, :acp_agent_cannot_resume)
+    end
+  end
+
+  # What every session-setup call carries beyond its own fields. The
+  # directories are re-sent on resume and load for the same reason the MCP
+  # servers are: the adapters fingerprint them per session, so leaving them
+  # off would read as "the client removed them".
+  defp session_params(state, params) do
+    params
+    |> put_additional_directories(state)
+    |> ExecutionLimits.session_params(state.session_options.execution_limits)
+  end
+
+  defp put_additional_directories(params, state) do
+    case state.session_options.additional_directories do
+      [] ->
+        params
+
+      directories ->
+        if supports?(state, ["sessionCapabilities", "additionalDirectories"]),
+          do: Map.put(params, :additionalDirectories, directories),
+          else: params
     end
   end
 
@@ -1350,6 +1376,17 @@ defmodule Managoat.ACP.Peer do
   end
 
   defp now_ms, do: System.monotonic_time(:millisecond)
+
+  # ACP requires absolute paths, and codex-acp refuses the whole session over
+  # one bad entry. Refusing at start names the fault; a refused `session/new`
+  # would not.
+  defp validate_directories(directories) when is_list(directories) do
+    if Enum.all?(directories, &(is_binary(&1) and Path.type(&1) == :absolute)),
+      do: :ok,
+      else: {:error, :invalid_additional_directories}
+  end
+
+  defp validate_directories(_), do: {:error, :invalid_additional_directories}
 
   defp supports?(state, path) do
     case get_in(state.capabilities, path) do

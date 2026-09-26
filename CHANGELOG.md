@@ -10,6 +10,16 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-26
+
+### Added
+
+- `:additional_directories` on `Peer.start/1`: absolute paths sent as ACP's
+  `additionalDirectories` on session new/load/resume, when the agent
+  advertises `sessionCapabilities.additionalDirectories`. codex-acp adds them
+  to its sandbox's writable roots (managoat/fountain#1684). Invalid entries
+  return `{:error, :invalid_additional_directories}` from `start/1`.
+
 ## [0.4.3] - 2026-09-14
 
 ### Added

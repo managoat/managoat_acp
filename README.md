@@ -82,6 +82,17 @@ claims, not billing verification. Missing metadata means unqualified accounting.
 A metadata-only report has no token keys; it is not measured zero usage. Read
 named counters, not every value in the map. Older reports keep their original shape.
 
+## Additional directories
+
+Pass `additional_directories:` to `Peer.start/1`, a list of absolute paths,
+to give the agent directories beyond its `cwd`. The peer sends them as ACP's
+`additionalDirectories` on session new/load/resume, but only when the agent
+advertises `sessionCapabilities.additionalDirectories`; otherwise it leaves
+the field off. codex-acp adds them to its sandbox's writable roots, and
+claude-agent-acp passes them to the SDK. A relative path or a non-string
+entry makes `start/1` return `{:error, :invalid_additional_directories}`
+before it writes anything.
+
 ## Execution limits
 
 Build a typed limit set and pass it as `execution_limits:` to `Peer.start/1`:
