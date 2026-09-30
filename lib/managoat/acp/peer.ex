@@ -14,6 +14,12 @@ defmodule Managoat.ACP.Peer.State do
     session_options: %{mcp_servers: [], additional_directories: [], execution_limits: nil},
     model: nil,
     model_selection: %{result: %{}, effective: nil, source: nil},
+    # Session config options beyond the model (managoat/fountain#2537).
+    # `requested` is what the owner asked for, id to value; `options` is the
+    # latest set the agent advertised (a session result, a setter response or
+    # a `config_option_update`), nil until one arrives; `queue` is what is left
+    # to apply before this turn's prompt.
+    config: %{requested: %{}, options: nil, queue: []},
     client_capabilities: nil,
     # The effective per-tool permission policy for this turn (#939). Already
     # merged and clamped by `Permissions.effective/2` before it gets here —
@@ -30,9 +36,9 @@ defmodule Managoat.ACP.Peer.State do
     phase: :initializing,
     failed_session_setup: nil,
     replay_discard?: false,
-    # Both set from opts in `init/1`; the defaults live on the peer module.
-    replay_quiet_ms: nil,
-    replay_max_ms: nil,
+    # `%{quiet_ms:, max_ms:}`, from opts in `init/1`; the defaults live on the
+    # peer module.
+    replay_window: nil,
     replay_result: nil,
     replay_last_ms: nil,
     replay_until_ms: nil,
@@ -184,6 +190,9 @@ defmodule Managoat.ACP.Peer do
           | {:session, String.t()}
           | {:prompt_sent, pos_integer()}
           | {:model_selected, String.t() | nil, String.t() | nil, String.t() | nil}
+          | {:config_selected, id :: String.t(), requested :: config_value(), confirmed :: term()}
+          | {:config_skipped, id :: String.t(), requested :: config_value()}
+          | {:config_options, [map()]}
           | {:handshake_ms, non_neg_integer(), method :: String.t()}
           | {:done, stop_reason :: String.t(), usage :: map() | nil}
           | {:cycle_end, kind :: String.t()}
@@ -191,6 +200,9 @@ defmodule Managoat.ACP.Peer do
              options :: [map()]}
           | {:permission_denied, tool :: String.t() | nil, verdict :: String.t()}
           | {:failed, term()}
+
+  @typedoc "A requested session config value: a select option's value, or a boolean."
+  @type config_value :: String.t() | boolean()
 
   # ── public api ────────────────────────────────────────────────────────────
 
@@ -226,6 +238,14 @@ defmodule Managoat.ACP.Peer do
   entry that is not an absolute path returns an error before any handshake
   bytes are written.
 
+  `:config` is a map of session config option id to value (a string or a
+  boolean) applied through `session/set_config_option` after the model and
+  before every prompt — reasoning effort, fast mode, whatever the agent
+  advertises. Ids and values are the agent's own and are not checked against
+  a list here: an id the agent does not advertise is skipped and reported,
+  and a value it refuses fails the turn. `"model"` is not accepted here;
+  `:model` owns it. See the README's "Session config options".
+
   `:execution_limits` accepts a validated `Managoat.ACP.ExecutionLimits` value.
   It is sent on session creation/load/resume and retained on this connection.
   Invalid limits return an error before any handshake bytes are written. The
@@ -244,6 +264,7 @@ defmodule Managoat.ACP.Peer do
     _ = writer!(opts)
 
     with :ok <- validate_directories(Keyword.get(opts, :additional_directories, [])),
+         :ok <- validate_config(Keyword.get(opts, :config) || %{}),
          {:ok, _limits} <- ExecutionLimits.validate(Keyword.get(opts, :execution_limits)) do
       GenServer.start(__MODULE__, opts)
     end
@@ -275,6 +296,9 @@ defmodule Managoat.ACP.Peer do
 
   @doc """
   Send a turn with an updated model; selection completes before the prompt is written.
+  `:config` replaces the requested session config options for this turn and
+  the ones after it (`nil` clears them); omitting it keeps the previous
+  request. A malformed map returns `{:error, :invalid_config}`.
   An explicit `:execution_limits` must equal the existing connection limits.
   Changed or malformed limits return an error without sending a prompt.
   """
@@ -373,10 +397,13 @@ defmodule Managoat.ACP.Peer do
       permission_policy: Keyword.get(opts, :permission_policy) || %{},
       pending_permission: restore_pending(Keyword.get(opts, :pending_permission)),
       model: Keyword.get(opts, :model),
+      config: %{requested: Keyword.get(opts, :config) || %{}, options: nil, queue: []},
       client_capabilities:
         Keyword.get(opts, :client_capabilities) || Protocol.default_client_capabilities(),
-      replay_quiet_ms: Keyword.get(opts, :replay_quiet_ms, @replay_quiet_ms),
-      replay_max_ms: Keyword.get(opts, :replay_max_ms, @replay_max_ms),
+      replay_window: %{
+        quiet_ms: Keyword.get(opts, :replay_quiet_ms, @replay_quiet_ms),
+        max_ms: Keyword.get(opts, :replay_max_ms, @replay_max_ms)
+      },
       auth: %{choice: Keyword.get(opts, :auth, :api_key), methods: [], authenticated?: false},
       started_mono: System.monotonic_time(:millisecond)
     }
@@ -508,7 +535,8 @@ defmodule Managoat.ACP.Peer do
     requested = Keyword.get(opts, :execution_limits, state.session_options.execution_limits)
 
     with {:ok, limits} <- ExecutionLimits.validate(requested),
-         true <- limits == state.session_options.execution_limits do
+         true <- limits == state.session_options.execution_limits,
+         :ok <- validate_config(Keyword.get(opts, :config, state.config.requested) || %{}) do
       prompt_on_connection(state, prompt, images, opts)
     else
       false -> {:reply, {:error, :acp_execution_limits_changed}, state}
@@ -556,12 +584,12 @@ defmodule Managoat.ACP.Peer do
   def handle_info(:replay_check, %State{phase: :draining_replay} = state) do
     quiet_for = now_ms() - state.replay_last_ms
 
-    if quiet_for >= state.replay_quiet_ms or now_ms() >= state.replay_until_ms do
+    if quiet_for >= state.replay_window.quiet_ms or now_ms() >= state.replay_until_ms do
       %{state | replay_discard?: false}
       |> pin_model_then_prompt(state.replay_result)
       |> noreply()
     else
-      state |> schedule_replay_check(state.replay_quiet_ms - quiet_for) |> noreply()
+      state |> schedule_replay_check(state.replay_window.quiet_ms - quiet_for) |> noreply()
     end
   end
 
@@ -610,6 +638,7 @@ defmodule Managoat.ACP.Peer do
       state
       |> persist("acp", Protocol.notification("session/update", params))
       |> report_cycle_end(params)
+      |> track_config_options(params)
     end
   end
 
@@ -635,6 +664,16 @@ defmodule Managoat.ACP.Peer do
        when is_map_key(state.pending, id) do
     {_tag, state} = pop_pending(state, id)
     fail(state, {:model_selection_failed, state.model, error_detail(error)})
+  end
+
+  # The same rule for a config option the agent advertised: its refusal is the
+  # check (there is no list of valid values here), and it names the fault in
+  # its own words, so the turn fails with them rather than running on a
+  # setting nobody asked for (managoat/fountain#724 is the model precedent).
+  defp handle_message({:error_response, id, error}, %State{phase: :setting_config} = state)
+       when is_map_key(state.pending, id) do
+    {{:set_config, config_id, value}, state} = pop_pending(state, id)
+    fail(state, {:config_selection_failed, config_id, value, error_detail(error)})
   end
 
   # Attached mid-turn: an error for an id we never sent is a replay of one the
@@ -762,6 +801,14 @@ defmodule Managoat.ACP.Peer do
     end
   end
 
+  # Both pinned adapters announce a changed option set this way — claude's when
+  # fast mode drops into cooldown, for instance — so the next turn starts from
+  # what the agent last said rather than from the session result.
+  defp track_config_options(state, %{"update" => %{"sessionUpdate" => "config_option_update"} = u}),
+       do: remember_config_options(state, u)
+
+  defp track_config_options(state, _params), do: state
+
   defp origin_kind(%{"_meta" => %{"_claude/origin" => %{"kind" => kind}}}), do: kind
   defp origin_kind(_), do: nil
 
@@ -874,7 +921,10 @@ defmodule Managoat.ACP.Peer do
     case Map.get(result, "sessionId") do
       id when is_binary(id) ->
         report(state, {:session, id})
-        pin_model_then_prompt(%{state | session_id: id}, result)
+
+        %{state | session_id: id}
+        |> remember_config_options(result)
+        |> pin_model_then_prompt(result)
 
       _ ->
         fail(state, {:acp_no_session_id, result})
@@ -882,7 +932,7 @@ defmodule Managoat.ACP.Peer do
   end
 
   defp handle_response(:resume_session, result, state),
-    do: pin_model_then_prompt(state, result)
+    do: state |> remember_config_options(result) |> pin_model_then_prompt(result)
 
   # ACP says the agent MUST replay the conversation as `session/update`
   # notifications *before* responding to `session/load`, which would make this
@@ -904,16 +954,19 @@ defmodule Managoat.ACP.Peer do
   # cheap next to gemini's ~2.8s handshake, and it comes off entirely when the
   # upstream `await` lands.
   defp handle_response(:load_session, result, state) do
+    state = remember_config_options(state, result)
+
     schedule_replay_check(%{
       state
       | phase: :draining_replay,
         replay_result: result,
         replay_last_ms: now_ms(),
-        replay_until_ms: now_ms() + state.replay_max_ms
+        replay_until_ms: now_ms() + state.replay_window.max_ms
     })
   end
 
   defp handle_response(:set_model, result, state) do
+    state = remember_config_options(state, result)
     effective = current_model(result)
 
     if is_binary(effective) and not same_model?(effective, state.model) do
@@ -925,7 +978,7 @@ defmodule Managoat.ACP.Peer do
     else
       source = if effective, do: "runtime", else: "selection_ack"
 
-      send_prompt(%{
+      model_settled(%{
         state
         | model_selection: %{
             state.model_selection
@@ -934,6 +987,15 @@ defmodule Managoat.ACP.Peer do
           }
       })
     end
+  end
+
+  # The setter answers with the whole option set as it now stands, which is
+  # how a value the agent normalised or clamped gets reported as what it is.
+  defp handle_response({:set_config, config_id, value}, result, state) do
+    state = remember_config_options(state, result)
+    confirmed = Map.get(find_option(state.config.options, config_id) || %{}, "currentValue")
+    report(state, {:config_selected, config_id, value, confirmed})
+    apply_next_config(state)
   end
 
   # Authenticated; open (or reopen) the session.
@@ -1058,7 +1120,11 @@ defmodule Managoat.ACP.Peer do
       state
       | prompt: prompt,
         images: images,
-        model: Keyword.get(opts, :model, state.model)
+        model: Keyword.get(opts, :model, state.model),
+        config: %{
+          state.config
+          | requested: Keyword.get(opts, :config, state.config.requested) || %{}
+        }
     }
 
     state = pin_model_then_prompt(state, state.model_selection.result)
@@ -1175,7 +1241,7 @@ defmodule Managoat.ACP.Peer do
       is_nil(state.model) or state.model == "" ->
         effective = state.model_selection.effective || current_model(result)
 
-        send_prompt(%{
+        model_settled(%{
           state
           | model_selection: %{
               state.model_selection
@@ -1276,6 +1342,100 @@ defmodule Managoat.ACP.Peer do
     Map.get(option, "currentValue") || get_in(result, ["models", "currentModelId"])
   end
 
+  # The model is pinned (or deliberately left alone). Everything else in the
+  # option set is only valid for a given model — claude offers `effort` only on
+  # a model that supports it, codex's `reasoning_effort` values are the model's
+  # own — so config options come after it, against the set the pin returned.
+  #
+  # `:model_selected` is still reported from `send_prompt/1`, after the
+  # options: hosts read it as "a prompt is about to be written" (Fountain
+  # stamps the turn's inference source on it), and a config refusal must not
+  # leave a turn that spent nothing looking like one that did.
+  defp model_settled(state) do
+    apply_next_config(put_in(state.config.queue, config_queue(state.config)))
+  end
+
+  # In the order the agent lists its options, which is the order its own UI
+  # applies them in; ids it does not list go last, by name, to be skipped.
+  defp config_queue(config) do
+    advertised =
+      (config.options || [])
+      |> Enum.map(&Map.get(&1, "id"))
+      |> Enum.with_index()
+      |> Map.new()
+
+    Enum.sort_by(config.requested, fn {id, _value} ->
+      {Map.get(advertised, id, map_size(advertised)), id}
+    end)
+  end
+
+  # One at a time, each checked against the set as it stands after the last:
+  # a setter may add or remove options, and a request for one the agent no
+  # longer offers is skipped rather than sent to be refused.
+  defp apply_next_config(%State{config: %{queue: []}} = state) do
+    if is_list(state.config.options), do: report(state, {:config_options, state.config.options})
+    send_prompt(state)
+  end
+
+  defp apply_next_config(%State{config: %{queue: [{config_id, value} | rest]}} = state) do
+    state = put_in(state.config.queue, rest)
+
+    case find_option(state.config.options, config_id) do
+      nil ->
+        # Options legitimately vary by model, so a request the current one
+        # does not offer is kept by the owner and reported, not failed.
+        report(state, {:config_skipped, config_id, value})
+        apply_next_config(state)
+
+      option ->
+        wire = config_wire_value(option, value)
+
+        if Map.get(option, "currentValue") == wire do
+          # Already so: the connection kept it, or the resumed session did.
+          # Skipping the round trip is most turns' case, and it is a turn's
+          # latency, not a background cost.
+          report(state, {:config_selected, config_id, value, wire})
+          apply_next_config(state)
+        else
+          send_request(
+            %{state | phase: :setting_config},
+            {:set_config, config_id, value},
+            "session/set_config_option",
+            config_params(state.session_id, config_id, wire)
+          )
+        end
+    end
+  end
+
+  # ACP's boolean config options (the `session.configOptions.boolean` client
+  # capability) take `type: "boolean"` beside the value; a select takes the
+  # value alone. Both pinned adapters fall back to an `on`/`off` select for a
+  # client that has not opted in, so a boolean request is translated to that
+  # shape, and an `on`/`off` request to the boolean one, rather than refused
+  # over a spelling.
+  defp config_wire_value(%{"type" => "boolean"}, value) when is_boolean(value), do: value
+  defp config_wire_value(%{"type" => "boolean"}, "on"), do: true
+  defp config_wire_value(%{"type" => "boolean"}, "off"), do: false
+  defp config_wire_value(_option, true), do: "on"
+  defp config_wire_value(_option, false), do: "off"
+  defp config_wire_value(_option, value), do: value
+
+  defp config_params(session_id, config_id, value) when is_boolean(value),
+    do: %{sessionId: session_id, configId: config_id, type: "boolean", value: value}
+
+  defp config_params(session_id, config_id, value),
+    do: %{sessionId: session_id, configId: config_id, value: value}
+
+  defp remember_config_options(state, %{"configOptions" => options}) when is_list(options),
+    do: put_in(state.config.options, Enum.filter(options, &is_map/1))
+
+  defp remember_config_options(state, _result), do: state
+
+  defp find_option(options, config_id) when is_list(options),
+    do: Enum.find(options, &(Map.get(&1, "id") == config_id))
+
+  defp find_option(_options, _config_id), do: nil
+
   defp send_prompt(state) do
     report(
       state,
@@ -1371,7 +1531,7 @@ defmodule Managoat.ACP.Peer do
   defp report(state, payload), do: send(state.owner, {:acp, state.ref, payload})
 
   defp schedule_replay_check(state, after_ms \\ nil) do
-    Process.send_after(self(), :replay_check, after_ms || state.replay_quiet_ms)
+    Process.send_after(self(), :replay_check, after_ms || state.replay_window.quiet_ms)
     state
   end
 
@@ -1387,6 +1547,22 @@ defmodule Managoat.ACP.Peer do
   end
 
   defp validate_directories(_), do: {:error, :invalid_additional_directories}
+
+  # Only the shape: string ids and string-or-boolean values. Which ids and
+  # values exist is the agent's to say, per session and per model, and its
+  # refusal is the check. `"model"` belongs to `:model`, whose pin comes first
+  # and is verified; accepting it here too would make two answers to one
+  # question.
+  defp validate_config(config) when is_map(config) do
+    valid? =
+      Enum.all?(config, fn {id, value} ->
+        is_binary(id) and id not in ["", "model"] and (is_binary(value) or is_boolean(value))
+      end)
+
+    if valid?, do: :ok, else: {:error, :invalid_config}
+  end
+
+  defp validate_config(_), do: {:error, :invalid_config}
 
   defp supports?(state, path) do
     case get_in(state.capabilities, path) do

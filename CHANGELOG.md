@@ -10,6 +10,37 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-30
+
+### Added
+
+- `:config` on `Peer.start/1` and `Peer.prompt/4`: session config options
+  such as reasoning effort and fast mode, applied with
+  `session/set_config_option` after the model and before every prompt
+  (managoat/fountain#2537). Ids the agent does not advertise are skipped and
+  reported; a refused value fails the turn. See the README's "Session config
+  options".
+- New owner payloads: `{:config_selected, id, requested, confirmed}`,
+  `{:config_skipped, id, requested}`, `{:config_options, options}` and the
+  failure reason `{:config_selection_failed, id, requested, detail}`.
+- `ScriptedAgent` answers `session/set_config_option` the way the pinned
+  adapters do when `:session_result` has `configOptions`. It refuses unknown
+  ids and out-of-list values, and replies with the updated option list.
+
+### Changed
+
+- **Breaking for owners without a catch-all:** `{:config_options, options}` is
+  reported before every prompt when the agent advertises any options, even
+  with no `:config` given. claude-agent-acp and codex-acp both advertise
+  options.
+- `Protocol.default_client_capabilities/0` declares
+  `session.configOptions.boolean`, so the pinned adapters advertise fast mode
+  as `type: "boolean"` instead of an `on`/`off` select. This changes nothing
+  else in claude-agent-acp 0.81.2 or codex-acp 1.10.0.
+- `ScriptedAgent`'s model pin now reports the value it was given as
+  `currentValue`. A pin against its `configOptions` is therefore reported with
+  source `"runtime"` rather than `"selection_ack"`.
+
 ## [0.4.4] - 2026-09-26
 
 ### Added

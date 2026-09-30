@@ -186,4 +186,15 @@ defmodule Managoat.ACP.ProtocolTest do
       assert err["message"] == "no fs"
     end
   end
+
+  describe "default_client_capabilities/0" do
+    test "services nothing, and opts into boolean session config options" do
+      caps = Protocol.default_client_capabilities()
+
+      assert caps.terminal == false
+      assert caps.fs == %{readTextFile: false, writeTextFile: false}
+      # Both pinned adapters test `session.configOptions.boolean != null`.
+      assert %{session: %{configOptions: %{boolean: %{}}}} = caps
+    end
+  end
 end

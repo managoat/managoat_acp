@@ -51,7 +51,7 @@ def handle_info({:acp, ref, {:done, stop_reason, usage}}, state), do: close_turn
 
 | Module | Role |
 |---|---|
-| `Managoat.ACP.Peer` | One connection, for as many turns as its owner sends it. `initialize` → `session/new` / `session/resume` / `session/load` → `session/prompt`; then `:idle`, where `prompt/3` sends the next turn on the same session. Answers `session/request_permission` from the policy, refuses `fs/*` and `terminal/*` (the client declares neither), authenticates when the agent offers an api-key method, pins the model through whichever of `session/set_config_option` and `session/set_model` the agent advertises. |
+| `Managoat.ACP.Peer` | One connection, for as many turns as its owner sends it. `initialize` → `session/new` / `session/resume` / `session/load` → `session/prompt`; then `:idle`, where `prompt/3` sends the next turn on the same session. Answers `session/request_permission` from the policy, refuses `fs/*` and `terminal/*` (the client declares neither), authenticates when the agent offers an api-key method, pins the model through whichever of `session/set_config_option` and `session/set_model` the agent advertises, then applies the requested session config options. |
 | `Managoat.ACP.Transport` | The seam. A `writer :: (iodata -> :ok \| {:error, term})` for outbound frames; inbound bytes go through `Peer.stdout/2`. Not a behaviour, not a process. |
 | `Managoat.ACP.Protocol` | Framing (`feed/2` carries the partial tail across chunks), classification, encoding, `initialize_params/1`. Pure. |
 | `Managoat.ACP.Permissions` | The policy map and what it answers: `auto_allow`, `ask`, `auto_deny` per tool title, per ACP `kind`, or by default; most-specific-first matching; `effective/2` clamps a launch's policy to be no looser than the agent's; `deny_outcome/1` refuses from the options the agent offered and never invents one. |
@@ -166,15 +166,19 @@ nothing but protocol; these are the whole contract.
 | `{:session, id}` | `session/new` answered | Persist as the durable session id; hand it back as `session_id:` with `mode: :continue` on the next connection. |
 | `{:prompt_sent, id}` | the moment `session/prompt` is on the wire, first turn and every `prompt/3` | Persist on the turn. After a restart, a peer started with `attach: id` joins the turn already in flight and closes it on the response to that id. |
 | `{:handshake_ms, ms, method}` | `initialize` answered | A metric, labelled with the session call about to be made (`"session/new"`, `"session/resume"`, `"session/load"`), because those pay different prices. |
-| `{:model_selected, requested, effective, source}` | selection before each prompt | Persist separately from saved configuration. `runtime` means returned model metadata; `selection_ack` means a successful setter response without a model field. |
+| `{:model_selected, requested, effective, source}` | selection before each prompt, reported after the config options and immediately before `session/prompt` is written | Persist separately from saved configuration. `runtime` means returned model metadata; `selection_ack` means a successful setter response without a model field. |
 | `{:failed, {:model_selection_failed, requested, detail}}` | selection refused, unsupported, or confirmed a different model | Fail the turn. No `session/prompt` was written. |
+| `{:config_selected, id, requested, confirmed}` | a requested [config option](#session-config-options) the agent advertises, after the model, before each prompt | Record what was applied. `confirmed` is the option's `currentValue` as the agent reported it after the change, which can differ from `requested` (fast mode an account cannot use stays off). |
+| `{:config_skipped, id, requested}` | a requested config option the agent does not advertise right now | Keep the request, since the option may come back with another model. Say it was not applied. |
+| `{:config_options, options}` | before each prompt, when the agent advertises any config options | The agent's option list after every change, as it sent it: `id`, `name`, `category`, `type`, `options`, `currentValue`. Shows a client what the current model supports. |
+| `{:failed, {:config_selection_failed, id, requested, detail}}` | the agent refused a config option it advertises | Fail the turn with `detail`, the agent's own message. No `session/prompt` was written. |
 | `{:permission_ask, request_id, tool, options}` | the policy said `ask` | Show `options` to a human, arm a timeout (`Permissions.ask_timeout_ms/1`), answer with `Peer.answer_permission/3` or `Peer.deny_permission/2`. Persist `%{"request_id" => …, "tool" => …, "options" => […]}` as `pending_permission:` for a reattached peer, so a request raised before a restart is still answerable after one. The same request also arrives as a `{:lines, "acp", …}` so it renders inline as a `:permission_request` block. |
 | `{:permission_denied, tool, verdict}` | the policy said `auto_deny` (or a value that is not a verdict) | Audit it. Allows are deliberately not reported. |
 | `{:cycle_end, kind}` | a `usage_update` whose origin is in the adapter's autonomous set (a background task's follow-up) | Close whatever turn the owner opened for the out-of-turn lines. |
 | `{:done, stop_reason, usage}` | the `session/prompt` response | The turn is over and the peer is `:idle`; `usage` is `Usage.t()` or `nil`. The next `prompt/3` reuses the connection. |
 | `{:failed, reason}` | a write failed, a request errored, or the session could not be set up | Writing stops. A failed resume/load before any prompt may use [missing-session recovery](#recovering-a-missing-session); otherwise close the turn, then `Peer.close/1`. Reasons: `{:acp_write_failed, reason}`, `{:acp_error, tag, error}`, `{:acp_no_session_id, result}`, `:acp_resume_without_session_id`, `:acp_agent_cannot_resume`, and two the owner can act on, `{:oauth_org_not_allowed, detail}` and `{:model_unavailable, model, detail}`. |
 
-Ten payloads, all from `Peer`. The two failure reasons at the end are worth
+Thirteen payloads, all from `Peer`. The two failure reasons at the end are worth
 matching on: one is the runtime's OAuth token belonging to an organisation
 that disabled subscription access, the other a provider refusing the model
 itself, and both reach the tenant as a sentence rather than an inspected
@@ -356,3 +360,46 @@ model; it does not reset the session or discard its history. No catalog
 allowlist is imposed by this client: the runtime accepts or rejects the ID.
 A successful selection is ACP evidence, not proof of provider execution;
 verify provider/session metadata when testing an integration.
+
+## Session config options
+
+`:config` on `Peer.start/1` and `Peer.prompt/4` is a map of config option id
+to value, a string or a boolean. Before every prompt, after the model, the
+peer applies it with `session/set_config_option`. That is how reasoning
+effort and fast mode reach the pinned adapters:
+
+| Adapter | Effort | Fast |
+|---|---|---|
+| claude-agent-acp 0.81.2 | `effort`, category `thought_level` | `fast`, category `model_config` |
+| codex-acp 1.10.0 | `reasoning_effort`, category `thought_level` | `fast-mode`, category `model_config` |
+
+The agent decides what exists, per session and per model. Claude offers
+`effort` only on a model that supports it, and the values are that model's
+own. So the peer works from the option list the agent last sent (the session
+result, the model pin's response, each setter's response, and any
+`config_option_update` notification), not from a list of its own:
+
+- Requests go out one at a time, in the order the agent lists its options.
+  Each one is checked against the list as it stands after the one before.
+- An id the agent does not list is reported as `{:config_skipped, …}`, and
+  the turn continues.
+- A value the agent already reports as current is not sent again, so a turn
+  on an open connection usually costs no extra round trip.
+- An error response fails the turn with `{:config_selection_failed, …}`
+  before any prompt is written. The agent's refusal is the check. The peer
+  does not validate values.
+- A boolean goes out as ACP's boolean option (`type: "boolean"` beside the
+  value) when the agent advertises one, and as `"on"`/`"off"` against an
+  on/off select. `"on"` and `"off"` requested against a boolean option are
+  translated the other way.
+
+`"model"` is not accepted in `:config`; `:model` owns it. `prompt/4` with
+`config:` replaces the request for that turn and later ones, and `config: nil`
+clears it. Omitting it keeps the previous request. A malformed map (non-string
+ids, values that are not strings or booleans) returns
+`{:error, :invalid_config}` from either call.
+
+The default client capabilities include `session.configOptions.boolean`, so
+the pinned adapters advertise fast mode as a real boolean. An owner passing
+its own `:client_capabilities` gets the `on`/`off` select instead, and the
+peer handles both.
