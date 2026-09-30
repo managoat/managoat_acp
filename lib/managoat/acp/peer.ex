@@ -1346,13 +1346,12 @@ defmodule Managoat.ACP.Peer do
   # option set is only valid for a given model — claude offers `effort` only on
   # a model that supports it, codex's `reasoning_effort` values are the model's
   # own — so config options come after it, against the set the pin returned.
+  #
+  # `:model_selected` is still reported from `send_prompt/1`, after the
+  # options: hosts read it as "a prompt is about to be written" (Fountain
+  # stamps the turn's inference source on it), and a config refusal must not
+  # leave a turn that spent nothing looking like one that did.
   defp model_settled(state) do
-    report(
-      state,
-      {:model_selected, state.model, state.model_selection.effective,
-       state.model_selection.source}
-    )
-
     apply_next_config(put_in(state.config.queue, config_queue(state.config)))
   end
 
@@ -1438,6 +1437,12 @@ defmodule Managoat.ACP.Peer do
   defp find_option(_options, _config_id), do: nil
 
   defp send_prompt(state) do
+    report(
+      state,
+      {:model_selected, state.model, state.model_selection.effective,
+       state.model_selection.source}
+    )
+
     params = %{
       sessionId: state.session_id,
       prompt: [%{type: "text", text: state.prompt} | image_blocks(state.images)]

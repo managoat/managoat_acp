@@ -94,10 +94,11 @@ defmodule Managoat.ACP.PeerConfigTest do
                {"session/prompt", nil}
              ]
 
-      assert_receive {:acp, _, {:model_selected, "opus", "opus", "runtime"}}
+      # `:model_selected` is last: hosts read it as "the prompt is going out".
       assert_receive {:acp, _, {:config_selected, "effort", "high", "high"}}
       assert_receive {:acp, _, {:config_selected, "fast", true, true}}
       assert_receive {:acp, _, {:config_options, final}}
+      assert_receive {:acp, _, {:model_selected, "opus", "opus", "runtime"}}
       assert Enum.find(final, &(&1["id"] == "effort"))["currentValue"] == "high"
       assert_receive {:acp, _, {:done, "end_turn", nil}}
     end
@@ -197,6 +198,8 @@ defmodule Managoat.ACP.PeerConfigTest do
 
       assert_receive {:acp, _, {:failed, {:config_selection_failed, "effort", "max", detail}}}
       assert detail =~ "Invalid value for config option effort"
+      # No prompt, so nothing reads as a turn that spent tokens.
+      refute_received {:acp, _, {:model_selected, _, _, _}}
       refute_receive {:scripted_agent, :wrote, %{"method" => "session/prompt"}}, 50
     end
 
