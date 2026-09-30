@@ -39,7 +39,8 @@ defmodule Managoat.ACP.Testing.ScriptedAgent do
   | `authenticate` | `{}` |
   | `session/new` | `sessionId` from `:session_id`, merged with `:session_result` (put `configOptions` or `models` there to make the peer pin a model) |
   | `session/resume`, `session/load` | `:session_result` |
-  | `session/set_config_option`, `session/set_model` | `{}` |
+  | `session/set_config_option` | with no `configOptions` in `:session_result`, `{}`. With them, what the pinned adapters do: an id not listed is refused (`-32602`), as is a value outside a select's `options` (an option with no `options` list takes any value) or a non-boolean for a `boolean` option other than `"on"`/`"off"`; otherwise the option's `currentValue` becomes the value and the reply is the whole `configOptions` list, which later session results and setters also see |
+  | `session/set_model` | `{}` |
   | `session/prompt` | the turn: `session/request_permission` first when `:permission` is set, then every map in `:updates` as a `session/update` notification, then the response with `:stop_reason` and `:usage` |
   | `session/cancel` | the outstanding prompt's response with `stopReason: "cancelled"` |
   | anything else with an id | a `-32601` error |
@@ -183,10 +184,14 @@ defmodule Managoat.ACP.Testing.ScriptedAgent do
     respond(state, id, state.session_result)
   end
 
-  defp handle({:request, id, method, _params}, state)
-       when method in ["session/set_config_option", "session/set_model"] do
-    respond(state, id, %{})
+  defp handle({:request, id, "session/set_config_option", params}, state) do
+    case Map.get(state.session_result, "configOptions") do
+      options when is_list(options) -> set_config_option(state, id, options, params)
+      _ -> respond(state, id, %{})
+    end
   end
+
+  defp handle({:request, id, "session/set_model", _params}, state), do: respond(state, id, %{})
 
   defp handle({:request, id, "session/prompt", _params}, state) do
     state = %{state | prompt_id: id}
@@ -247,6 +252,62 @@ defmodule Managoat.ACP.Testing.ScriptedAgent do
       })
     )
   end
+
+  defp set_config_option(state, id, options, %{"configId" => config_id} = params) do
+    value = Map.get(params, "value")
+
+    case Enum.find(options, &(Map.get(&1, "id") == config_id)) do
+      nil ->
+        refuse(state, id, "Unknown config option: #{config_id}")
+
+      option ->
+        case accepted_value(option, value) do
+          {:ok, current} ->
+            options =
+              Enum.map(options, fn
+                %{"id" => ^config_id} = o -> Map.put(o, "currentValue", current)
+                o -> o
+              end)
+
+            state = put_in(state.session_result["configOptions"], options)
+            respond(state, id, %{"configOptions" => options})
+
+          :error ->
+            refuse(state, id, "Invalid value for config option #{config_id}: #{inspect(value)}")
+        end
+    end
+  end
+
+  defp set_config_option(state, id, _options, _params),
+    do: refuse(state, id, "configId is required")
+
+  defp accepted_value(%{"type" => "boolean"}, value) when is_boolean(value), do: {:ok, value}
+  defp accepted_value(%{"type" => "boolean"}, "on"), do: {:ok, true}
+  defp accepted_value(%{"type" => "boolean"}, "off"), do: {:ok, false}
+  defp accepted_value(%{"type" => "boolean"}, _value), do: :error
+
+  defp accepted_value(option, value) when is_binary(value) do
+    case Map.get(option, "options") do
+      values when is_list(values) and values != [] ->
+        valid =
+          values
+          |> Enum.flat_map(fn o -> Map.get(o, "options") || [o] end)
+          |> Enum.map(&Map.get(&1, "value"))
+
+        if value in valid or value == Map.get(option, "currentValue"),
+          do: {:ok, value},
+          else: :error
+
+      _ ->
+        {:ok, value}
+    end
+  end
+
+  defp accepted_value(_option, _value), do: :error
+
+  # Invalid params, which is what codex-acp answers; claude-agent-acp's is an
+  # internal error with the same sentence. The peer reads the sentence.
+  defp refuse(state, id, message), do: emit(state, Protocol.error(id, -32_602, message))
 
   defp respond(state, id, result), do: emit(state, Protocol.response(id, result))
 

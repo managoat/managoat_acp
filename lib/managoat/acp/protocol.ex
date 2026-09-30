@@ -145,17 +145,29 @@ defmodule Managoat.ACP.Protocol do
   def method_not_found, do: -32_601
 
   @doc """
-  The client capabilities the peer declares unless told otherwise: none.
+  The client capabilities the peer declares unless told otherwise: no
+  services, and boolean session config options.
 
   `fs/*` and `terminal/*` are client-implemented, and a client that declares
   them has to service them against wherever the agent is running. Declaring
   nothing means a well-behaved adapter never asks; the peer still answers
   anything that arrives with `method_not_found/0`, because an unanswered
   request blocks the agent.
+
+  `session.configOptions.boolean` asks for nothing to be serviced. It lets an
+  agent advertise an on/off option as `type: "boolean"` instead of an
+  `on`/`off` select, which the peer's `:config` sends with the `type` the
+  protocol requires beside the value. In the pinned adapters
+  (claude-agent-acp 0.81.2, codex-acp 1.10.0) it changes the shape of the fast
+  mode option and nothing else.
   """
   @spec default_client_capabilities() :: map()
   def default_client_capabilities do
-    %{fs: %{readTextFile: false, writeTextFile: false}, terminal: false}
+    %{
+      fs: %{readTextFile: false, writeTextFile: false},
+      terminal: false,
+      session: %{configOptions: %{boolean: %{}}}
+    }
   end
 
   @doc """
