@@ -10,6 +10,34 @@ the package ships without a bump fails the release gate.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-14
+
+### Fixed
+
+- A session config option requested on one prompt no longer outlives that
+  turn on a live peer (managoat/fountain#2537). The first time the peer
+  changes an id in a session it records the value the agent reported just
+  before (the baseline); a later turn whose `:config` does not name that id
+  puts it back through `session/set_config_option`. A restore is skipped when
+  the option is already at its baseline or the agent no longer offers the
+  option or the value; a refused restore is logged and does not fail the
+  turn. Baselines are cleared on `session/new`, `session/resume` and
+  `session/load`. Before this, `effort` or `fast` set on one prompt stayed in
+  effect until the adapter process restarted.
+
+### Added
+
+- New owner payload `{:config_restored, id, confirmed}`, reported after the
+  agent confirms a restore.
+
+### Changed
+
+- **Breaking for owners without a catch-all:** `{:config_restored, id,
+  confirmed}` can be reported before any prompt on a peer's second or later
+  turn. `prompt/4` with `config: nil` (or a map that leaves an id out) now
+  puts every option the session changed back to its baseline, where it used
+  to leave them as the last turn set them.
+
 ## [0.5.0] - 2026-09-30
 
 ### Added
