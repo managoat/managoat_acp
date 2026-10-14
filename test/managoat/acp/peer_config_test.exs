@@ -478,6 +478,46 @@ defmodule Managoat.ACP.PeerConfigTest do
       assert_receive {:acp, _, {:done, "end_turn", nil}}
     end
 
+    test "a restore checks a grouped select's values, and takes an option that lists none at its word" do
+      grouped = %{
+        "id" => "effort",
+        "type" => "select",
+        "currentValue" => "medium",
+        "options" => [
+          %{"group" => "fast", "name" => "Fast", "options" => [%{"value" => "low"}]},
+          %{
+            "group" => "deep",
+            "name" => "Deep",
+            "options" => [%{"value" => "medium"}, %{"value" => "high"}]
+          },
+          %{"name" => "malformed"}
+        ]
+      }
+
+      free = %{"id" => "persona", "type" => "select", "currentValue" => "plain"}
+      unset = %{"id" => "style", "type" => "select"}
+
+      {_agent, pid} =
+        start([session_result: %{"configOptions" => [grouped, free, unset]}],
+          config: %{"effort" => "high", "persona" => "pirate", "style" => "terse"}
+        )
+
+      assert_receive {:acp, _, {:done, "end_turn", nil}}
+      flush_mailbox()
+
+      assert :ok = Peer.prompt(pid, "plain", [], config: %{})
+
+      # `style` had no value before the change, so there is nothing to restore.
+      assert methods_through_prompt() == [
+               {"session/set_config_option", "effort"},
+               {"session/set_config_option", "persona"},
+               {"session/prompt", nil}
+             ]
+
+      assert_receive {:acp, _, {:config_restored, "effort", "medium"}}
+      assert_receive {:acp, _, {:config_restored, "persona", "plain"}}
+    end
+
     test "a refused restore does not fail the turn" do
       test = self()
       writer = fn data -> send(test, {:wrote, Jason.decode!(data)}) && :ok end
