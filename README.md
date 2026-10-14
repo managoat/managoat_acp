@@ -393,9 +393,20 @@ result, the model pin's response, each setter's response, and any
   on/off select. `"on"` and `"off"` requested against a boolean option are
   translated the other way.
 
+- An id that the request does not name does not keep a value an earlier
+  turn set. The first time the peer changes an id in a session, it records
+  the value the agent reported just before (the baseline). A later turn whose
+  request does not name that id puts it back, reported as
+  `{:config_restored, id, confirmed}`. A restore is skipped when the option
+  is already at its baseline, when the agent no longer offers the option or
+  the value, and, if the agent refuses it, logged rather than failing a turn
+  that asked for nothing. A new, resumed or loaded session starts with no
+  baselines.
+
 `"model"` is not accepted in `:config`; `:model` owns it. `prompt/4` with
 `config:` replaces the request for that turn and later ones, and `config: nil`
-clears it. Omitting it keeps the previous request. A malformed map (non-string
+clears it, which puts every option the session changed back to its baseline.
+Omitting it keeps the previous request. A malformed map (non-string
 ids, values that are not strings or booleans) returns
 `{:error, :invalid_config}` from either call.
 
