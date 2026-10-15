@@ -1,5 +1,13 @@
 # Managoat.ACP
 
+> **Archived 2026-10-15.** This library has been folded back into
+> [Fountain](https://github.com/managoat/fountain), its only maintained consumer,
+> at [`apps/fountain/lib/managoat/acp`](https://github.com/managoat/fountain/tree/main/apps/fountain/lib/managoat/acp)
+> ([managoat/fountain#2737](https://github.com/managoat/fountain/pull/2737)).
+> Every release on Hex is retired; they stay installable, but there will be no
+> further releases.
+
+
 The client side of the [Agent Client Protocol](https://agentclientprotocol.com),
 as a session that outlives the turn. ACP is JSON-RPC 2.0 over newline-delimited
 JSON between a *client* (an editor, or a platform that runs agents for people)
